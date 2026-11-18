@@ -2938,13 +2938,32 @@ class Sts2PlayerPlugin(Star):
                     not battle_now.get("is_play_phase")
                     or bool(battle_now.get("waiting_for_players"))
                 )
+                # 多人局「地图上已经投过票、等别人投」也属于等待：状态会一直不变，
+                # 但那不是卡住。不归进这里的话，规则层返回 wait → 状态不变 8 次
+                # → 误判「状态卡住」直接停机（真机 2026-11-18 11:35 踩到）。
+                if stype == "map":
+                    m_now = st.get("map") or {}
+                    if "local_vote" in m_now:
+                        waiting = waiting or bool(m_now.get("local_vote"))
+                    else:
+                        waiting = waiting or bool(m_now.get("voted_player_ids"))
                 if waiting:
                     waits += 1
-                    if waits > 600:
-                        yield event.plain_result(
-                            "等了很久还没轮到我出手（等队友 / 敌人回合卡住了？），先停下。\n"
-                            + render_state(st)
-                        )
+                    limit = 600
+                    if stype == "map":
+                        # 地图上等人投票等太久 = 对方根本没在玩，说清楚而不是干等
+                        limit = 90
+                    if waits > limit:
+                        if stype == "map":
+                            yield event.plain_result(
+                                "在地图上等别人投票等太久了（对面可能没在操作），先停下。\n"
+                                + render_state(st)
+                            )
+                        else:
+                            yield event.plain_result(
+                                "等了很久还没轮到我出手（等队友 / 敌人回合卡住了？），先停下。\n"
+                                + render_state(st)
+                            )
                         return
                     await asyncio.sleep(max(0.8, interval))
                     continue
