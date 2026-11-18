@@ -127,6 +127,7 @@ $p = "$env:APPDATA\SlayTheSpire2\default\<clientId>\settings.save"
 | `tools/` `docs/` | 上游自带的开发工具与文档，未修改 |
 | `SYNC.md` | 与上游的差异、同步/回滚方法 |
 | `_project/` | 实测报告、验证脚手架、补丁文件 |
+| `_project/2026-11-18-交接文档.md` | **最新交接文档**（功能清单、未验证项、环境踩坑） |
 
 ## 许可
 
