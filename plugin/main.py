@@ -2902,6 +2902,21 @@ class Sts2PlayerPlugin(Star):
         same_count = 0
         report: list[str] = []
 
+        # 先吐一条「开跑」，不要等 report_every。原实现只在 i % report_every == 0
+        # 或 i == steps 时说话，配置默认 report_every=15、max_steps=20，
+        # 而一般只发 /sts2 自动 10 —— 10 % 15 != 0 且 10 != 20，
+        # 于是整轮一句话都没有，用户以为机器人死了（真机 2026-11-18 12:03 踩到）。
+        try:
+            _st0 = await self.client.state()
+            yield event.plain_result(
+                f"开始自动打 {steps} 步（每步间隔 {interval}s，每 {report_every} 步播报一次）。\n"
+                + render_state(_st0)
+            )
+        except Sts2Error as e:
+            yield event.plain_result(str(e))
+            self._running.discard(umo)
+            return
+
         try:
             i = 0
             waits = 0
@@ -2953,6 +2968,17 @@ class Sts2PlayerPlugin(Star):
                     if stype == "map":
                         # 地图上等人投票等太久 = 对方根本没在玩，说清楚而不是干等
                         limit = 90
+                    # 第一次进等待就说一声，别闷头睡 70 秒。之后每 30 次再提醒一次。
+                    if waits == 1 or (waits % 30 == 0 and waits < limit):
+                        if stype == "map":
+                            yield event.plain_result(
+                                f"地图上已经投过票了，等你投票中…（第 {waits} 次检查）"
+                            )
+                        else:
+                            yield event.plain_result(
+                                f"还在等我方行动（第 {waits} 次检查）："
+                                + ("已结束回合，等队友" if battle_now.get("waiting_for_players") else "敌人回合")
+                            )
                     if waits > limit:
                         if stype == "map":
                             yield event.plain_result(
@@ -3105,9 +3131,22 @@ class Sts2PlayerPlugin(Star):
                         log.append(f"✓ {name} {params} → {_one_line(res.get('message'), 80)}")
 
                 i += 1
-                if i % report_every == 0 or i == steps:
+                # 播报：按 report_every 汇总，但最后一步一定播。
+                # 原来只有 `i % report_every == 0 or i == steps`，当 steps 小于
+                # report_every（默认 20 vs 15，常见用法 /sts2 自动 10）时永远不播。
+                if i % report_every == 0 or i >= steps:
                     report.append(f"— 第 {i} 步 —\n" + render_state(st))
                     yield event.plain_result("\n\n".join(report[-1:]))
+                else:
+                    # 步数不够一次完整播报时，给一行极简进度，别让用户干等
+                    yield event.plain_result(
+                        f"[{i}/{steps}] {SCREEN_CN.get(stype, stype)}"
+                        + (
+                            " · " + _one_line(log[-1], 70)
+                            if log
+                            else ""
+                        )
+                    )
 
                 await asyncio.sleep(interval)
 
