@@ -88,20 +88,56 @@ def main() -> int:
     })
     cases.append(("D 可投但节点空", d))
 
+    # 场景 E：**已投过票、但 choose_map_node 仍在 available_actions 里**。
+    # 真机踩到（2026-11-18 11:21）：游戏允许改票，动作不会消失，
+    # 旧补丁只看动作在不在，结果 3.2 秒内重复投了 9 次同一票。
+    e = base_state(
+        available_actions=["choose_map_node"],
+        map={
+            "current_position": {"row": 1, "col": 1},
+            "next_options": [{"index": 0, "row": 2, "col": 2, "type": "Monster"}],
+            "boss": {"row": 15, "col": 3},
+            "can_vote": True,
+            "local_vote": {"row": 2, "col": 2},
+            "voted_player_ids": ["8"],
+        },
+    )
+    cases.append(("E 已投票但动作仍在", e))
+
+    # 场景 F：别人投了、本方没投 —— 应该照常投票（别误判成自己投过）
+    f = base_state(
+        available_actions=["choose_map_node"],
+        map={
+            "current_position": {"row": 1, "col": 1},
+            "next_options": [{"index": 0, "row": 2, "col": 2, "type": "Monster"}],
+            "boss": {"row": 15, "col": 3},
+            "can_vote": True,
+            "local_vote": None,
+            "voted_player_ids": ["1"],   # 别人投过
+        },
+    )
+    cases.append(("F 别人投了我没投", f))
+
     print(f"{'场景':<24} {'规则层返回'}")
     print("-" * 70)
     bad = 0
     for name, st in cases:
         act = bot.next_action(st)
         print(f"{name:<24} {act}")
-        if name.startswith(("B", "C", "D")) and act is None:
+        if name.startswith(("B", "C", "D", "E")) and act is None:
+            bad += 1
+        if name.startswith("E") and act is not None and act.get("action") != "wait":
+            print(f"    ↳ ✗ 场景 E 应返回 wait，实际 {act}")
+            bad += 1
+        if name.startswith("F") and (act is None or act.get("action") != "choose_map_node"):
+            print(f"    ↳ ✗ 场景 F 应投票，实际 {act}")
             bad += 1
 
     print()
     if bad:
-        print(f"✗ 有 {bad} 个多人场景仍然返回 None（会整局停下）")
+        print(f"✗ 有 {bad} 个多人场景不符合预期")
         return 1
-    print("✓ 全部多人场景都不会返回 None（不会再卡死在地图）")
+    print("✓ 全部多人场景通过（含已投票不重投、别人投票不误判）")
     return 0
 
 

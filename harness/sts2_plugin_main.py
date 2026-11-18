@@ -1888,11 +1888,24 @@ class RuleBot:
         m = st.get("map") or {}
         opts = m.get("next_options") or []
         acts = [str(a) for a in st.get("available_actions") or []]
+        # local_vote 是「本方」的票（实测：8082 的 local_vote 有值、8081 为空），
+        # 所以优先用它判断本方是否已投。voted_player_ids 是全场所有人的票，
+        # 单看它会把「别人投了、我没投」误当成自己投过。
+        # 只有 local_vote 字段整个缺失（老/异常 payload）时，才退回用 voted_player_ids：
+        # 宁可多等一轮，也别重复投票或把界面判成「不认识」而停下。
+        if "local_vote" in m:
+            voted = bool(m.get("local_vote"))
+        else:
+            voted = bool(m.get("voted_player_ids"))
         # 多人局：本方还没投票 → 投一票；已经投过 → 等别人，别当成「不认识的界面」停下。
         # （v0.4.8 之前这里直接 return None，多人局一投票 AstrBot 就整局卡死在地图。）
+        #
+        # 注意：「已投过」必须先判断。`choose_map_node` 在投票后**仍然留在
+        # available_actions 里**（游戏允许改票），所以只看动作在不在会每轮重投一次。
+        # 真机实测（2026-11-18 11:21）：3.2 秒内投了 9 次同一票。
+        if voted:
+            return {"action": "wait"}
         if "choose_map_node" not in acts:
-            if m.get("local_vote") or m.get("voted_player_ids"):
-                return {"action": "wait"}
             return None
         if not opts:
             return {"action": "wait"}
