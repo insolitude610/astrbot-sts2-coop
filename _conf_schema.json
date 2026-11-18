@@ -93,5 +93,40 @@
     "description": "后台托管最长连续运行小时数，超过自动停（防止忘了关）。默认 4 小时",
     "type": "float",
     "default": 4.0
+  },
+  "autopilot_from_chat": {
+    "description": "允许用自然语言启动托管（私聊发「有牌打」「帮我打」之类就开始）。关掉后只能用 /sts2 托管",
+    "type": "bool",
+    "default": true
+  },
+  "autopilot_triggers": {
+    "description": "触发托管的自然语言关键词列表（包含匹配，仅私聊生效）",
+    "type": "list",
+    "default": ["有牌打", "帮我打", "帮忙打", "开始打", "打吧", "你来打", "托管", "auto"]
+  },
+  "chat_pause_sec": {
+    "description": "你发消息时托管暂停多少秒后自动恢复（给 bot 回复留出时间）",
+    "type": "float",
+    "default": 6.0
+  },
+  "nudge_enabled": {
+    "description": "托管卡住时主动问一句（『已经等了 N 秒，还在等你…』）。关掉就只是安静地等",
+    "type": "bool",
+    "default": true
+  },
+  "nudge_after_sec": {
+    "description": "卡住多少秒后主动问一句",
+    "type": "float",
+    "default": 60.0
+  },
+  "max_nudges": {
+    "description": "同一局最多主动问几次（QQ 官方对主动推送有限流，别设太大）",
+    "type": "int",
+    "default": 3
+  },
+  "nudge_cooldown_sec": {
+    "description": "两次主动询问之间至少间隔多少秒",
+    "type": "float",
+    "default": 300.0
   }
 }

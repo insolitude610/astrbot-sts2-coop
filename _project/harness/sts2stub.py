@@ -62,8 +62,30 @@ class _AstrMessageEvent:
         return text
 
 
+class _EventMessageType:
+    """占位枚举：插件里只用到 PRIVATE_MESSAGE。"""
+
+    PRIVATE_MESSAGE = "PRIVATE_MESSAGE"
+    GROUP_MESSAGE = "GROUP_MESSAGE"
+    ALL = "ALL"
+
+
 class _Filter:
+    EventMessageType = _EventMessageType
+
     def command(self, *a, **kw):
+        def deco(fn):
+            return fn
+
+        return deco
+
+    def command_group(self, *a, **kw):
+        def deco(fn):
+            return fn
+
+        return deco
+
+    def event_message_type(self, *a, **kw):
         def deco(fn):
             return fn
 
@@ -81,7 +103,31 @@ class _Filter:
 
         return deco
 
+    def on_astrbot_loaded(self, *a, **kw):
+        def deco(fn):
+            return fn
+
+        return deco
+
     llm_tool = command
+
+
+class _Plain:
+    type = "Plain"
+
+    def __init__(self, text: str = ""):
+        self.text = text
+
+    def __str__(self):
+        return self.text
+
+
+class _MessageChain:
+    def __init__(self, chain=None, **kw):
+        self.chain = list(chain or [])
+
+    def __str__(self):
+        return "".join(str(c) for c in self.chain)
 
 
 class Star:
@@ -103,6 +149,10 @@ def _install() -> None:
     event_mod = types.ModuleType("astrbot.api.event")
     event_mod.AstrMessageEvent = _AstrMessageEvent
     event_mod.filter = _Filter()
+    event_mod.MessageChain = _MessageChain
+
+    mc_mod = types.ModuleType("astrbot.api.message_components")
+    mc_mod.Plain = _Plain
 
     star_mod = types.ModuleType("astrbot.api.star")
     star_mod.Context = type("Context", (), {})
@@ -110,12 +160,14 @@ def _install() -> None:
 
     api.event = event_mod
     api.star = star_mod
+    api.message_components = mc_mod
     astrbot.api = api
 
     sys.modules["astrbot"] = astrbot
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.event"] = event_mod
     sys.modules["astrbot.api.star"] = star_mod
+    sys.modules["astrbot.api.message_components"] = mc_mod
 
 
 _install()

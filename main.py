@@ -2698,6 +2698,9 @@ class Sts2PlayerPlugin(Star):
         # 后台托管：常驻循环，不需要玩家反复下指令
         self._autopilot: bool = False
         self._autopilot_task: asyncio.Task | None = None
+        # 玩家在聊天时暂停出牌，回复完自动恢复
+        self._paused_for_chat: bool = False
+        self._chat_resume_task: asyncio.Task | None = None
 
     # ---- 杂项 ----
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -2716,6 +2719,10 @@ class Sts2PlayerPlugin(Star):
     async def terminate(self) -> None:
         # 先把后台托管停掉，否则 AstrBot 关插件时 task 会残留
         await self._stop_autopilot(quiet=True)
+        rt = self._chat_resume_task
+        self._chat_resume_task = None
+        if rt and not rt.done():
+            rt.cancel()
         await self.client.close()
 
     # ---- 后台托管（常驻循环，不需要每步发指令）----
@@ -2725,21 +2732,40 @@ class Sts2PlayerPlugin(Star):
         与 `/sts2 自动 N` 的区别：
           · `_auto` 是一次性任务，跑满 N 步就返回；
           · 本循环常驻，直到 `/sts2 停止托管`、对局结束、或游戏断开。
+
+        三个额外行为（都是可配置的）：
+          · 玩家来消息时**等当前动作做完再暂停**，回复完自动继续
+          · 卡住（主机/队友不动）超过 nudge_after_sec 主动问一句
+          · 同一局主动询问最多 max_nudges 次
         """
         interval = float(self._cfg("autopilot_interval_sec", 0.6))
         max_hours = float(self._cfg("autopilot_max_hours", 4.0))
+        nudge_after = float(self._cfg("nudge_after_sec", 60.0))
+        nudge_enabled = bool(self._cfg("nudge_enabled", True))
+        max_nudges = int(self._cfg("max_nudges", 3))
+        nudge_cooldown = float(self._cfg("nudge_cooldown_sec", 300.0))
+
         started = time.monotonic()
         errors = 0
         idle = 0
         waits = 0
         last_sig = ""
         same_count = 0
+        wait_since: float | None = None
+        nudges = 0
+        last_nudge = 0.0
 
         try:
             while self._autopilot:
                 if time.monotonic() - started > max_hours * 3600:
                     await self._notify(umo, "后台托管已连续运行超过上限，先停下。")
                     return
+
+                # 玩家刚发过消息：等这一条回复完再继续出牌（不打断正在跑的动作）
+                if self._paused_for_chat:
+                    await asyncio.sleep(0.3)
+                    continue
+
                 try:
                     st = await self.client.state()
                 except Exception as e:  # noqa: BLE001
@@ -2774,9 +2800,30 @@ class Sts2PlayerPlugin(Star):
                     if waits > 900:
                         await self._notify(umo, "后台托管：等了很久还在等别人，先停下。")
                         return
+                    # 卡住了：到点主动问一句（可配置；有冷却和次数上限）
+                    now2 = time.monotonic()
+                    if wait_since is None:
+                        wait_since = now2
+                    waited_sec = now2 - wait_since
+                    if (
+                        nudge_enabled
+                        and waited_sec >= nudge_after
+                        and nudges < max_nudges
+                        and (now2 - last_nudge) >= nudge_cooldown
+                    ):
+                        nudges += 1
+                        last_nudge = now2
+                        who = "队友" if battle_now.get("waiting_for_players") else "你"
+                        await self._notify(
+                            umo,
+                            f"（托管中）已经等了 {int(waited_sec)} 秒，还在等{who}"
+                            f"{'出牌' if stype in COMBAT_SCREENS else '投票'}。"
+                            f"需要我继续等，还是先停一下？",
+                        )
                     await asyncio.sleep(max(0.8, interval))
                     continue
                 waits = 0
+                wait_since = None
 
                 sig = f"{stype}:{zlib.crc32(json.dumps(st, ensure_ascii=False, sort_keys=True).encode())}"
                 same_count = same_count + 1 if sig == last_sig else 0
@@ -2828,20 +2875,45 @@ class Sts2PlayerPlugin(Star):
             self._autopilot = False
             self._autopilot_task = None
 
+    async def _resume_after_chat(self) -> None:
+        """玩家发完消息、bot 回完之后，把托管恢复。
+
+        等一小会儿再放开：给本轮回复留出生成和发送时间，
+        否则可能出现「bot 话还没说完，后台又开始出牌」。
+        """
+        try:
+            await asyncio.sleep(float(self._cfg("chat_pause_sec", 6.0)))
+        except asyncio.CancelledError:
+            return
+        self._paused_for_chat = False
+
     async def _notify(self, umo: str, text: str) -> None:
         """主动往会话推一条消息（后台循环没有 event，只能这样发）。
 
-        注意：`context.send_message` 在 qq_official 平台**不支持**（AstrBot 源码
-        Context.send_message 的注释里写明），会抛异常或返回 False。
-        所以这里发不出去也不能影响托管循环本身，失败就只记一条日志。
+        注意：`context.send_message` 在 qq_official 的**群聊**里如果没有
+        缓存的 msg_id 会被跳过（私聊不受这个限制）。发送失败不能影响托管循环本身。
         """
+        chain = None
         try:
-            from astrbot.api.event import MessageChain
-            from astrbot.api.message_components import Plain
+            from astrbot.api.event import MessageChain  # type: ignore
+            from astrbot.api.message_components import Plain  # type: ignore
 
-            ok = await self.context.send_message(umo, MessageChain([Plain(text)]))
+            chain = MessageChain([Plain(text)])
+        except Exception:  # noqa: BLE001
+            try:
+                from astrbot.core.message.message_event_result import MessageChain as MC  # type: ignore
+                from astrbot.core.message.components import Plain as P  # type: ignore
+
+                chain = MC([P(text)])
+            except Exception:  # noqa: BLE001
+                chain = None
+        if chain is None:
+            logger.info("STS2 托管通知：%s", text.replace("\n", " "))
+            return
+        try:
+            ok = await self.context.send_message(umo, chain)
             if ok is False:
-                logger.info("STS2 托管通知（平台不支持主动发送，已跳过）：%s", text.replace("\n", " "))
+                logger.info("STS2 托管通知（平台未发送，已跳过）：%s", text.replace("\n", " "))
         except Exception as e:  # noqa: BLE001
             logger.info("STS2 托管通知：%s（发送失败：%s）", text.replace("\n", " "), e)
 
@@ -2853,6 +2925,7 @@ class Sts2PlayerPlugin(Star):
         except Exception as e:  # noqa: BLE001
             return f"读不到游戏状态，先启动游戏和队友实例：{e}"
         self._autopilot = True
+        self._paused_for_chat = False
         self._autopilot_task = asyncio.create_task(self._autopilot_loop(umo))
         return (
             "✅ 后台托管已启动，我会一直打下去，你不用再发指令。\n"
@@ -2863,6 +2936,11 @@ class Sts2PlayerPlugin(Star):
     async def _stop_autopilot(self, quiet: bool = False) -> bool:
         was = self._autopilot
         self._autopilot = False
+        self._paused_for_chat = False
+        rt = self._chat_resume_task
+        self._chat_resume_task = None
+        if rt and not rt.done():
+            rt.cancel()
         task = self._autopilot_task
         self._autopilot_task = None
         if task and not task.done():
@@ -3332,6 +3410,31 @@ class Sts2PlayerPlugin(Star):
             self._running.discard(umo)
             self._stop.discard(umo)
 
+    # ---- 自然语言触发托管 ----
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def maybe_start_from_chat(self, event: AstrMessageEvent):
+        """玩家随口一句「有牌打」「帮我打」就开始托管，不用背指令。
+
+        只在私聊生效（群里太吵，容易误触发）。已经开着就不重复启动。
+        识别不到就静默放行，不影响正常聊天。
+        """
+        if not self._cfg("autopilot_from_chat", True):
+            return
+        if self._autopilot:
+            return
+        text = (event.message_str or "").strip()
+        if not text or len(text) > 40:
+            return
+        triggers = self._cfg(
+            "autopilot_triggers",
+            ["有牌打", "帮我打", "帮忙打", "开始打", "打吧", "你来打", "托管", "auto"],
+        )
+        low = text.lower()
+        if not any(str(t).lower() in low for t in (triggers or [])):
+            return
+        msg = await self._start_autopilot(event.unified_msg_origin)
+        yield event.plain_result(msg)
+
     # ---- 聊天时自动注入对局上下文 ----
     @filter.on_llm_request()
     async def inject_game_context(self, event: AstrMessageEvent, req):
@@ -3341,7 +3444,17 @@ class Sts2PlayerPlugin(Star):
           1. 游戏没开 / 接口不通 → 静默跳过，一行都不加
           2. 不开着不查：状态快照缓存 N 秒，连发多条消息不会每条都打接口
           3. 注入内容只给压缩后的 render_state，不含原始 JSON
+
+        另外这里承担一个职责：**玩家发消息时把托管暂停**，
+        避免「玩家在说话，bot 在后台闷头出牌」这种各说各话的感觉。
         """
+        # 玩家主动说话 → 暂停托管出牌，等这轮回复完再继续
+        if self._autopilot:
+            self._paused_for_chat = True
+            if self._chat_resume_task and not self._chat_resume_task.done():
+                self._chat_resume_task.cancel()
+            self._chat_resume_task = asyncio.create_task(self._resume_after_chat())
+
         if not self._cfg("inject_game_context", True):
             return
         # 游戏没开时，第一次探测失败后短时间内不再重试，避免每条消息都等超时
