@@ -21,6 +21,15 @@
 3. 插件 `astrbot_plugin_sts2_player` v0.4.8 是**单人局打磨出来的**，多人局有 5 个真实缺陷，
    已在 [patches/](patches/) 里修复
 
+## 目录
+
+| 路径 | 内容 |
+|---|---|
+| `plugin/` | **插件源码（本地修改版）**，与上游的差异见 [plugin/SYNC.md](plugin/SYNC.md) |
+| `patches/` | 补丁文件，可对上游 v0.4.8 原版应用 |
+| `harness/` | 验证脚手架（见下） |
+| `*.md` | 设计稿、两轮实测报告 |
+
 ## 打补丁
 
 [patches/sts2-player-v0.4.8-multiplayer.patch](patches/sts2-player-v0.4.8-multiplayer.patch)
