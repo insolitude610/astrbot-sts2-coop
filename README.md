@@ -1,134 +1,138 @@
-# 杀戮尖塔 2 × AstrBot 陪玩
+# 杀戮尖塔 2 自动打牌 · 多人联机适配版
 
-让 AstrBot 通过游戏 mod 的本地 HTTP 接口，驱动一个**离线第二实例**当 AI 队友，和你一起爬塔。
+基于 [yuanzhe-xing102/astrbot_plugin_sts2_player](https://github.com/yuanzhe-xing102/astrbot_plugin_sts2_player) **v0.4.8** 的改进版，
+修掉了原版在**双人联机**下的 7 个缺陷。单人局行为与原版一致。
 
-> 不需要第二个 Steam 账号。用游戏自带的 FastMP 本地联机起一个 `--force-steam off` 的实例，
-> 它就能以独立玩家身份进你的大厅，外部程序通过它自己的本地 API 出牌。
+> 让 AstrBot 通过游戏 mod 的本地 HTTP 接口读取引擎真值，用**规则机器人**（零 token）打牌与构筑，
+> 也可选让 LLM 在关键界面决策。
 
-> [!IMPORTANT]
-> **`plugin/` 里的插件是 [yuanzhe-xing102/astrbot_plugin_sts2_player](https://github.com/yuanzhe-xing102/astrbot_plugin_sts2_player) v0.4.8 的副本，
-> 版权归原作者，采用 MIT 许可。** 本仓库只对 `plugin/main.py` 打了多人联机适配补丁，
-> 其余文件未修改。完整来源说明见 [NOTICE.md](NOTICE.md)。
+## 与原版的区别
+
+原版是**单人局**打磨出来的，一进双人联机就会卡死或误判。本版修复：
+
+| # | 问题 | 原版表现 |
+|---|---|---|
+| D1 | 地图投票后 `RuleBot._map()` 返回 `None` | **整局停下**，发 `/sts2 自动` 只回一句「不知道地图该做什么」 |
+| D2 | 瞬时过期快照被当硬错误 | 别人刚出完牌你就被 `409 invalid_action` 拒，累计 3 次停机 |
+| D3 | 结束回合后误判为「敌方回合」 | 空转到超时 |
+| D4 | `status=pending` 时转场没结束就继续 | 读到旧界面，动作白做 |
+| D5 | 已投票仍重复投票 | 真机实测 **3.2 秒投了 9 次**同一票 |
+| D6 | 地图等待被判为「状态卡住」 | 真机实测 **7.5 秒即停机** |
+| D7 | 播报条件永远不成立 | `/sts2 自动 10` **全程零回复**（`report_every=15` 且 `steps=10`） |
+
+另外启用了引擎自带的 `will_kill_player` 字段、补了药水槽满时的 `discard_potion` 处理。
+
+完整技术细节与复现数据见 [SYNC.md](SYNC.md) 与 [_project/2026-11-18-多人适配.md](_project/2026-11-18-多人适配.md)。
+
+## 安装
+
+**重要：AstrBot 要求插件目录名是 `astrbot_plugin_*`。** clone 后必须改名：
+
+```bash
+git clone https://github.com/insolitude610/astrbot-sts2-coop.git astrbot_plugin_sts2_player
+mv astrbot_plugin_sts2_player <ASTRBOT_ROOT>/data/plugins/
+```
+
+或直接下载 zip，解压后把文件夹改名为 `astrbot_plugin_sts2_player` 放进 `<ASTRBOT_ROOT>/data/plugins/`。
+
+装完**重启 AstrBot**（插件不会自动热重载，除非设了 `ASTRBOT_RELOAD=1`）。
+
+## 配置
+
+`<ASTRBOT_ROOT>/data/config/astrbot_plugin_sts2_player_config.json`：
+
+```json
+{
+  "sts2_url": "http://127.0.0.1:8082",
+  "operator_ids": ["<你的 QQ openid>"],
+  "max_steps": 20,
+  "step_interval_sec": 0.3,
+  "report_every": 15,
+  "use_llm": false,
+  "block_priority": 0.6,
+  "auto_restart": false
+}
+```
+
+> `sts2_url` 指向**队友实例**的端口。指向主窗口（8081）会去操作你自己的角色。
 >
-> 本仓库不含任何《杀戮尖塔 2》游戏资产；Slay the Spire 2 版权归 Mega Crit，本项目与其无关联。
+> `operator_ids` 从 AstrBot 日志里取：`default_xxx:FriendMessage:<openid>` 那段。
 
-## 文档
+## 游戏侧准备
 
-> 下文命令里的占位符，按你自己的环境替换：
->
-> | 占位符 | 含义 |
-> |---|---|
-> | `<ASTRBOT_ROOT>` | AstrBot 安装目录（含 `venv/`、`data/` 那一层） |
-> | `<repo>` | 本仓库在你机器上的路径 |
-> | `<GAME_DIR>` | 游戏安装目录（含 `SlayTheSpire2.exe` 那一层） |
-
-| 文件 | 内容 |
-|---|---|
-| [AstrBot-杀戮尖塔2-AI队友-设计方案.md](AstrBot-杀戮尖塔2-AI队友-设计方案.md) | 早期设计方案（走 AiTeammate mod 的 TCP 桥，**这条路线没走**） |
-| [2026-11-17-实测交接.md](2026-11-17-实测交接.md) | 第一轮实测：跑通「第二实例进大厅并开局」 |
-| [2026-11-18-多人适配.md](2026-11-18-多人适配.md) | 第二轮实测：多人局适配缺陷与修复（本目录代码对应这轮） |
-
-## 核心结论（截至 2026-11-18）
-
-1. **不需要第二个 Steam 账号** —— `--force-steam off` 的离线实例能进大厅
-2. **companion 角色的 `/action` 可用** —— `play_phase: paused` 只是 mod 自走循环的状态，
-   不影响外部驱动（这点第一轮没确认）
-3. 插件 `astrbot_plugin_sts2_player` v0.4.8 是**单人局打磨出来的**，多人局有 5 个真实缺陷，
-   已在 [patches/](patches/) 里修复
-
-## 目录
-
-| 路径 | 内容 |
-|---|---|
-| `plugin/` | **插件源码（本地修改版）**，与上游的差异见 [plugin/SYNC.md](plugin/SYNC.md) |
-| `patches/` | 补丁文件，可对上游 v0.4.8 原版应用 |
-| `harness/` | 验证脚手架（见下） |
-| `*.md` | 设计稿、两轮实测报告 |
-
-## 打补丁
-
-[patches/sts2-player-v0.4.8-multiplayer.patch](patches/sts2-player-v0.4.8-multiplayer.patch)
-是插件 v0.4.8 的多人适配修复（+217/−14）。原文件是**纯 LF**，Windows 上应用时必须关掉换行转换，
-否则会得到 CRLF 版本（内容一样但字节不同）：
+需要一个**离线的第二实例**当队友。不需要第二个 Steam 账号。
 
 ```powershell
-cd <插件目录>          # 里面要有 astrbot_plugin_sts2_player/main.py
-git -c core.autocrlf=false apply <repo>\patches\sts2-player-v0.4.8-multiplayer.patch
-```
-
-已验证：对 `main.py.bak-20261118-multiplayer` 应用后 SHA256 与线上版本完全一致。
-
-## harness/ 是什么
-
-在 AstrBot 进程之外，用插件**真实代码路径**直连游戏接口做验证的脚手架。
-好处是不用重启 AstrBot、不碰 QQ 会话；代价是没有验证 AstrBot 集成链路（鉴权、`plain_result`、事件循环）。
-
-| 脚本 | 用途 |
-|---|---|
-| `sts2stub.py` | AstrBot 最小桩：让插件 `main.py` 能在 AstrBot 外被 import |
-| `sts2ctl.py` | 通用探针：`probe` / `raw-state` / `actions` / `act` / `play` / `lobby` |
-| `selfcheck.py` | 适配层 / 规则层 / 渲染 / 重试判定，**29 项** |
-| `map_fix_check.py` | 多人地图 6 个场景（含已投票不重投、别人投票不误判） |
-| `map_wait_check.py` | 地图等待不被误判为「状态卡住」 |
-| `detect_fix_check.py` | 后端识别缓存、404 自愈，**12 项** |
-| `reply_check.py` | 自动打牌必有回复（开场 / 进度 / 收尾 / 等待提示），**9 项** |
-| `retry_check.py` | 动作被拒后的退避重试（`--live` 走真游戏） |
-| `retry_window.py` | 量化「过期快照」窗口：0s 必败 / 0.15s+ 基本成功 |
-| `rule_check.py` | 看规则层对当前状态会做什么（不实际发动作） |
-| `duo.py` | 双实例协同驱动（**会替你操作主窗口**，只用于验证） |
-| `e2e.py` | 端到端：主机模拟真人 + 队友走插件 `_auto` |
-
-`sts2_plugin_main.py` 是 `main.py` 的副本，供 harness import 用。改动插件后需重新拷贝：
-
-```powershell
-Copy-Item "<ASTRBOT_ROOT>\data\plugins\astrbot_plugin_sts2_player\main.py" `
-          "harness\sts2_plugin_main.py" -Force
-```
-
-### 跑测试
-
-```powershell
-$v = "<ASTRBOT_ROOT>\venv\Scripts\python.exe"
-cd harness
-& $v selfcheck.py          # 离线，不需要游戏开着
-& $v map_fix_check.py      # 离线
-& $v retry_check.py        # 离线
-```
-
-## 起一局（人工）
-
-```powershell
-$g = "<GAME_DIR>"
+$g = "<GAME_DIR>"   # 含 SlayTheSpire2.exe 那一层
 
 # 1. 主窗口（你自己玩）
 Start-Process "$g\SlayTheSpire2.exe" -ArgumentList '-fastmp','host_standard' -WorkingDirectory $g
 
-# 2. 队友实例（环境变量一个都不能少）
+# 2. 队友实例（等主窗口稳定 35 秒以上再拉，否则握手超时）
 $env:STS2_MULTIPLAYER_HOST_IP = '127.0.0.1'
-$env:STS2_MULTIPLAYER_NET_ID  = '3'          # 必须等于 --clientId
+$env:STS2_MULTIPLAYER_NET_ID  = '3'        # 必须等于 --clientId
 $env:STS2_API_PORT            = '8082'
 $env:STS2_API_ALLOW_FALLBACK  = '1'
 $env:STS2_AGENT_ROLE          = 'companion'
-$env:STS2_AGENT_AUTOPLAY      = '0'          # 0 = 外部接管
+$env:STS2_AGENT_AUTOPLAY      = '0'        # 0 = 外部接管
 $env:STS2_AGENT_SETTINGS_PATH = "$env:APPDATA\STS2AIAgent\settings.companion.json"
 Start-Process "$g\SlayTheSpire2.exe" `
   -ArgumentList '--windowed','--force-steam','off','--clientId','3','-fastmp','join' `
   -WorkingDirectory $g
 ```
 
-**新 clientId 首次启动必须补两个东西**（否则 mod 不加载、队友没有 API）：
+**新 clientId 首次启动必须补存档**（否则 mod 不加载、队友没有 API）：
 
 ```powershell
 $p = "$env:APPDATA\SlayTheSpire2\default\<clientId>\settings.save"
-# 把 "mod_settings": null 换成开启 STS2AIAgent，并把 seen_ea_disclaimer 设为 true
-# 改之前务必先关掉游戏进程，否则会被覆盖
+# 先启动一次让它生成目录，立刻关掉游戏进程，再改：
+#   "mod_settings": null  →  开启 STS2AIAgent
+#   "seen_ea_disclaimer": false → true
+#   "skip_intro_logo": false → true
 ```
 
-完整避坑清单见 [2026-11-18-多人适配.md](2026-11-18-多人适配.md)。
+游戏运行中改会被覆盖。详细踩坑清单见 [_project/2026-11-18-多人适配.md](_project/2026-11-18-多人适配.md)。
 
-## 已知未验证
+## 使用
 
-- **AstrBot 集成链路一次都没跑过**：QQ 里发 `/sts2 状态` / `/sts2 自动` 到插件的完整路径，
-  包括 `operator_ids` 鉴权、`plain_result` 回消息、插件在 AstrBot 事件循环里的表现
-- **没有完整打通一整局**：每次都在第 1 幕被反复重启打断
-- **LLM 决策路径未测**：所有测试都是 `use_llm=false` 的零 token 规则层
+在 QQ 私聊机器人：
+
+| 指令 | 说明 |
+|---|---|
+| `/sts2 状态` | 当前局面快照 |
+| `/sts2 自动 10` | 自动打 10 步（会逐步播报进度） |
+| `/sts2 执行 end_turn` | 手动下一个动作 |
+| `/sts2 停` | 停止 |
+| `/sts2 帮助` | 动作速查 |
+
+## 多人局须知
+
+- **必须双方都结束回合**才会推进。队友结束后会显示「（已结束回合，等队友）」
+- **地图需要双方都投票**。队友投完会提示「地图上已经投过票了，等你投票中」
+- 两边界面可能不同步，属正常现象
+- 双人局敌人血量约为单人的 2 倍
+
+## 已知限制
+
+- 规则层打不过第 1 幕 Boss 很正常，真机最好成绩第 15~17 层
+- LLM 决策实测**不如**规则层（作者数据：规则层第 15~17 层 / 0 token，全交模型第 5 层 / 49.9k token）
+- 只测过 `v0.113.1` + STS2-Agent `v0.19.2`
+
+## 目录说明
+
+| 路径 | 内容 |
+|---|---|
+| `main.py` | 插件本体（已打多人适配补丁） |
+| `PLUGIN-README.md` | 上游原版插件说明，保留原文 |
+| `tools/` `docs/` | 上游自带的开发工具与文档，未修改 |
+| `SYNC.md` | 与上游的差异、同步/回滚方法 |
+| `_project/` | 实测报告、验证脚手架、补丁文件 |
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+`plugin` 代码版权归原作者 **yuanzhe-xing102**，本仓库仅做多人适配修改。
+完整来源与合规说明见 [NOTICE.md](NOTICE.md)。
+
+本仓库不含任何游戏资产；Slay the Spire 2 版权归 Mega Crit，本项目与其无关联。

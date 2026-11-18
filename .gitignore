@@ -1,6 +1,6 @@
 # --- 测试产物：抓下来的原始状态快照，体积大且可随时重抓 ---
-harness/*.json
-harness/state_raw.json
+_project/harness/*.json
+_project/harness/state_raw.json
 
 # --- Python ---
 __pycache__/
@@ -21,6 +21,6 @@ desktop.ini
 *.local.json
 secrets/
 
-# �ύ��Ϣ��ʱ�ļ�
-.git-commit-msg.tmp
-.git-commit-msg*
+# --- 部署备份 ---
+*.bak-*
+main.py.bak-*

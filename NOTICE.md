@@ -1,35 +1,42 @@
-# 第三方代码与来源声明
+# 来源与合规声明
 
-本仓库包含**他人项目**的副本，不是本仓库原创。以下是逐一说明。
+本仓库的插件代码**来自他人项目**，不是原创。以下是明确说明。
 
-## plugin/ —— astrbot_plugin_sts2_player
+## 主体代码：astrbot_plugin_sts2_player
 
 | 项 | 值 |
 |---|---|
 | 原作者 | **yuanzhe-xing102** |
 | 上游仓库 | https://github.com/yuanzhe-xing102/astrbot_plugin_sts2_player |
-| 版本 | v0.4.8 |
-| 声明许可 | MIT（见上游 README「许可」一节；上游仓库根目录**未提供** LICENSE 文件） |
+| 版本 | v0.4.8（上游最后一版，2026-11-08） |
+| 声明许可 | MIT（见 `PLUGIN-README.md` 的「许可」一节） |
+| 上游 LICENSE 文件 | **不存在**（仓库根目录没有 LICENSE，源文件也没有版权行） |
 
 ### 本仓库对其做了什么
 
-`plugin/main.py` 打了多人联机适配补丁，具体改动见
-[patches/sts2-player-v0.4.8-multiplayer.patch](../patches/sts2-player-v0.4.8-multiplayer.patch)
-和 [plugin/SYNC.md](../plugin/SYNC.md)。
+**只修改了 `main.py`**，加入多人联机适配补丁。改动清单见 [SYNC.md](SYNC.md)，
+完整 diff 见 [_project/patches/sts2-player-v0.4.8-multiplayer.patch](_project/patches/sts2-player-v0.4.8-multiplayer.patch)。
 
-`plugin/` 下的其余文件（`metadata.yaml`、`_conf_schema.json`、`README.md`、
-`docs/`、`tools/`、`logo.png`）与上游 v0.4.8 **完全一致，未作修改**。
+以下文件与上游 v0.4.8 **完全一致，未作任何修改**：
 
-### 上游许可的注意事项
+- `metadata.yaml`（`author` / `repo` 字段保持原作者信息）
+- `_conf_schema.json`
+- `PLUGIN-README.md`（原 `README.md`，为避免与本仓库 README 冲突而改名）
+- `docs/DEV.md`
+- `tools/` 下全部 16 个脚本
+- `logo.png`
 
-上游声称 MIT 但根目录没有 LICENSE 文件，也没有在源文件里标注版权行。
-按 MIT 要求应保留版权声明，本仓库因此：
+### 上游未提供 LICENSE 文件的情况
 
-- 保留完整的原作者与来源信息（本文件）
-- 保留上游 `metadata.yaml` 里的 `author` / `repo` 字段原样
-- 保留上游 `README.md` 原文（含「许可」一节）
+上游声称 MIT，但仓库根目录没有 LICENSE 文件，源文件里也没有版权声明行。
+按 MIT 的要求本应保留版权声明，本仓库因此：
 
-若原作者认为本仓库的收录方式不妥，请提 issue，会立即移除。
+- 保留完整原作者与来源信息（本文件）
+- 保留 `metadata.yaml` 里的 `author` / `repo` / `social_link` 原样
+- 保留上游 README 原文
+- 在 `main.py` 里新增的代码处标注了修改原因
+
+若原作者认为本仓库的收录方式不妥，请提 issue，会立即移除相关代码。
 
 ## 游戏侧依赖（本仓库不含其代码）
 
@@ -38,10 +45,13 @@
 | [STS2-Agent](https://github.com/CharTyr/STS2-Agent) | 游戏 mod，提供本地 HTTP 接口 |
 | [AstrBot](https://github.com/AstrBotDevs/AstrBot) | 机器人框架 |
 
-## 文档与 harness/
+## 原创部分
 
-`README.md`、`*.md` 实测文档、`harness/` 下的验证脚本均为本仓库原创，
-采用与 [LICENSE](../LICENSE) 相同的 MIT 条款。
+以下内容为本仓库原创，采用与 [LICENSE](LICENSE) 相同的 MIT 条款：
+
+- `README.md`、`NOTICE.md`、`SYNC.md`
+- `_project/` 下的实测报告与 `harness/` 验证脚本
+- `main.py` 中的多人适配补丁
 
 ## 游戏资产
 

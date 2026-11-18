@@ -17,7 +17,7 @@ sys.path.insert(0, str(HERE))
 
 import sts2stub  # noqa: E402
 
-PLUGIN_MAIN = HERE / "sts2_plugin_main.py"
+PLUGIN_MAIN = HERE.parent.parent / "main.py"   # 仓库根的插件本体
 
 
 def base_state(**over):

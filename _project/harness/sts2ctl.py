@@ -29,7 +29,7 @@ import sts2stub  # noqa: E402  必须先装 AstrBot 桩
 
 import aiohttp  # noqa: E402
 
-PLUGIN_MAIN = HERE / "sts2_plugin_main.py"
+PLUGIN_MAIN = HERE.parent.parent / "main.py"   # 仓库根的插件本体
 
 
 async def http(method: str, url: str, payload: dict | None = None, timeout: float = 20.0):
