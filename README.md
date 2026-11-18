@@ -5,6 +5,13 @@
 > 不需要第二个 Steam 账号。用游戏自带的 FastMP 本地联机起一个 `--force-steam off` 的实例，
 > 它就能以独立玩家身份进你的大厅，外部程序通过它自己的本地 API 出牌。
 
+> [!IMPORTANT]
+> **`plugin/` 里的插件是 [yuanzhe-xing102/astrbot_plugin_sts2_player](https://github.com/yuanzhe-xing102/astrbot_plugin_sts2_player) v0.4.8 的副本，
+> 版权归原作者，采用 MIT 许可。** 本仓库只对 `plugin/main.py` 打了多人联机适配补丁，
+> 其余文件未修改。完整来源说明见 [NOTICE.md](NOTICE.md)。
+>
+> 本仓库不含任何《杀戮尖塔 2》游戏资产；Slay the Spire 2 版权归 Mega Crit，本项目与其无关联。
+
 ## 文档
 
 | 文件 | 内容 |
@@ -52,9 +59,12 @@ git -c core.autocrlf=false apply <repo>\patches\sts2-player-v0.4.8-multiplayer.p
 |---|---|
 | `sts2stub.py` | AstrBot 最小桩：让插件 `main.py` 能在 AstrBot 外被 import |
 | `sts2ctl.py` | 通用探针：`probe` / `raw-state` / `actions` / `act` / `play` / `lobby` |
-| `selfcheck.py` | **主测试**：29 项离线断言（适配层、规则层、渲染、重试判定） |
-| `map_fix_check.py` | 多人地图 4 个场景的规则层语义 |
-| `retry_check.py` | 动作被拒后的重试补丁（`--live` 走真游戏） |
+| `selfcheck.py` | 适配层 / 规则层 / 渲染 / 重试判定，**29 项** |
+| `map_fix_check.py` | 多人地图 6 个场景（含已投票不重投、别人投票不误判） |
+| `map_wait_check.py` | 地图等待不被误判为「状态卡住」 |
+| `detect_fix_check.py` | 后端识别缓存、404 自愈，**12 项** |
+| `reply_check.py` | 自动打牌必有回复（开场 / 进度 / 收尾 / 等待提示），**9 项** |
+| `retry_check.py` | 动作被拒后的退避重试（`--live` 走真游戏） |
 | `retry_window.py` | 量化「过期快照」窗口：0s 必败 / 0.15s+ 基本成功 |
 | `rule_check.py` | 看规则层对当前状态会做什么（不实际发动作） |
 | `duo.py` | 双实例协同驱动（**会替你操作主窗口**，只用于验证） |
