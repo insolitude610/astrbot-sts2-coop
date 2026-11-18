@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import zlib
 from typing import Any, AsyncGenerator
 
@@ -2682,6 +2683,10 @@ class Sts2PlayerPlugin(Star):
         )
         self._stop: set[str] = set()
         self._running: set[str] = set()
+        # 聊天上下文注入用的缓存：状态快照 + 下次允许探测的时间点。
+        # 游戏没开时靠它把「每条消息都等一次超时」压成「30 秒最多探一次」。
+        self._ctx_cache: dict | None = None
+        self._ctx_next_probe: float = 0.0
 
     # ---- 杂项 ----
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -3156,6 +3161,67 @@ class Sts2PlayerPlugin(Star):
         finally:
             self._running.discard(umo)
             self._stop.discard(umo)
+
+    # ---- 聊天时自动注入对局上下文 ----
+    @filter.on_llm_request()
+    async def inject_game_context(self, event: AstrMessageEvent, req):
+        """聊天时把当前对局状态注入到本轮请求，让 bot 知道战况。
+
+        用**临时内容块**（不进对话历史），并做三件事避免拖累闲聊：
+          1. 游戏没开 / 接口不通 → 静默跳过，一行都不加
+          2. 不开着不查：状态快照缓存 N 秒，连发多条消息不会每条都打接口
+          3. 注入内容只给压缩后的 render_state，不含原始 JSON
+        """
+        if not self._cfg("inject_game_context", True):
+            return
+        # 游戏没开时，第一次探测失败后短时间内不再重试，避免每条消息都等超时
+        now = time.monotonic()
+        if now < self._ctx_next_probe:
+            cached = self._ctx_cache
+            if cached is None:
+                return
+        else:
+            try:
+                st = await self.client.state()
+            except Exception:  # noqa: BLE001
+                # 接口不通：标记接下来一段时间不再探测，本轮不注入。
+                # 这里兜底捕获所有异常——聊天的注入绝不能因为游戏侧的问题把消息搞挂。
+                self._ctx_cache = None
+                self._ctx_next_probe = now + 30.0
+                return
+            cached = st
+            self._ctx_cache = st
+            self._ctx_next_probe = now + float(self._cfg("context_cache_sec", 8))
+
+        try:
+            text = render_state(cached)
+        except Exception:  # noqa: BLE001
+            return
+        if not text.strip():
+            return
+
+        try:
+            from astrbot.core.agent.message import TextPart
+        except Exception:  # noqa: BLE001
+            try:
+                from astrbot.api.message_components import Plain as TextPart  # type: ignore
+            except Exception:  # noqa: BLE001
+                return
+
+        block = (
+            f"<sts2_game_context>\n"
+            f"（这是玩家正在玩的《杀戮尖塔 2》当前真实状态，你是和他一起玩的队友。"
+            f"回答时可以自然引用战况，但不要复述这段原文。）\n"
+            f"{text}\n"
+            f"</sts2_game_context>"
+        )
+        try:
+            part = TextPart(text=block)
+            if hasattr(part, "mark_as_temp"):
+                part = part.mark_as_temp()
+            req.extra_user_content_parts.append(part)
+        except Exception:  # noqa: BLE001
+            logger.debug("STS2 注入游戏上下文失败", exc_info=True)
 
     # ---- 指令 ----
     @filter.command("sts2")

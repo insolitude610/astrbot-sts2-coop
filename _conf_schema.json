@@ -73,5 +73,15 @@
     "description": "模型决策的系统提示词（留空使用插件内置的动作说明）",
     "type": "text",
     "default": ""
+  },
+  "inject_game_context": {
+    "description": "聊天时把当前对局状态自动注入给模型（让 bot 聊天时知道战况）。游戏没开时自动跳过，不影响正常闲聊",
+    "type": "bool",
+    "default": true
+  },
+  "context_cache_sec": {
+    "description": "对局状态的缓存秒数。连发多条消息时复用同一份快照，避免每条消息都去请求游戏接口",
+    "type": "float",
+    "default": 8.0
   }
 }
