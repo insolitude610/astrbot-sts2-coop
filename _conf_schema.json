@@ -83,5 +83,15 @@
     "description": "对局状态的缓存秒数。连发多条消息时复用同一份快照，避免每条消息都去请求游戏接口",
     "type": "float",
     "default": 8.0
+  },
+  "autopilot_interval_sec": {
+    "description": "后台托管（/sts2 托管）每步之间的间隔秒数。太小会抢游戏动画时间，0.4-0.8 比较合适",
+    "type": "float",
+    "default": 0.6
+  },
+  "autopilot_max_hours": {
+    "description": "后台托管最长连续运行小时数，超过自动停（防止忘了关）。默认 4 小时",
+    "type": "float",
+    "default": 4.0
   }
 }

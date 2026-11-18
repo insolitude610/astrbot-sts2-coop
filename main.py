@@ -179,7 +179,15 @@ ACTION_HELP = """动作（POST 到 mod 的 JSON）
   claim_treasure_relic {"index":0}
   combat_select_card   {"card_index":0} / combat_confirm_selection {}
   crystal_sphere_click_cell {"x":4,"y":7} / crystal_sphere_set_tool {"tool":"big"}
-  menu_select          {"option":"singleplayer"}"""
+  menu_select          {"option":"singleplayer"}
+
+指令
+  /sts2 状态            看当前局面
+  /sts2 托管            后台托管：一直打，不用再发指令（/sts2 停止托管 停）
+  /sts2 自动 10         打 10 步就停（一次性）
+  /sts2 停止托管        停掉后台托管
+  /sts2 停             停止托管 + 一次性自动
+  /sts2 执行 <动作>     手动下一个动作"""
 
 
 # ---------------------------------------------------------------------------
@@ -2687,6 +2695,9 @@ class Sts2PlayerPlugin(Star):
         # 游戏没开时靠它把「每条消息都等一次超时」压成「30 秒最多探一次」。
         self._ctx_cache: dict | None = None
         self._ctx_next_probe: float = 0.0
+        # 后台托管：常驻循环，不需要玩家反复下指令
+        self._autopilot: bool = False
+        self._autopilot_task: asyncio.Task | None = None
 
     # ---- 杂项 ----
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -2703,7 +2714,166 @@ class Sts2PlayerPlugin(Star):
         return sid in {str(a) for a in allowed}
 
     async def terminate(self) -> None:
+        # 先把后台托管停掉，否则 AstrBot 关插件时 task 会残留
+        await self._stop_autopilot(quiet=True)
         await self.client.close()
+
+    # ---- 后台托管（常驻循环，不需要每步发指令）----
+    async def _autopilot_loop(self, umo: str) -> None:
+        """常驻循环：游戏开着就一直打，不需要玩家反复下指令。
+
+        与 `/sts2 自动 N` 的区别：
+          · `_auto` 是一次性任务，跑满 N 步就返回；
+          · 本循环常驻，直到 `/sts2 停止托管`、对局结束、或游戏断开。
+        """
+        interval = float(self._cfg("autopilot_interval_sec", 0.6))
+        max_hours = float(self._cfg("autopilot_max_hours", 4.0))
+        started = time.monotonic()
+        errors = 0
+        idle = 0
+        waits = 0
+        last_sig = ""
+        same_count = 0
+
+        try:
+            while self._autopilot:
+                if time.monotonic() - started > max_hours * 3600:
+                    await self._notify(umo, "后台托管已连续运行超过上限，先停下。")
+                    return
+                try:
+                    st = await self.client.state()
+                except Exception as e:  # noqa: BLE001
+                    errors += 1
+                    if errors >= 20:
+                        await self._notify(
+                            umo, f"后台托管连续 {errors} 次读不到游戏（{e}），已停止。"
+                        )
+                        return
+                    await asyncio.sleep(min(5.0, interval * (1 + errors * 0.5)))
+                    continue
+                errors = 0
+
+                stype = str(st.get("state_type") or "")
+                if stype == "game_over":
+                    await self._notify(umo, "后台托管：这一局结束了，已停止。")
+                    return
+
+                battle_now = st.get("battle") or {}
+                waiting = stype in COMBAT_SCREENS and (
+                    not battle_now.get("is_play_phase")
+                    or bool(battle_now.get("waiting_for_players"))
+                )
+                if stype == "map":
+                    m_now = st.get("map") or {}
+                    if "local_vote" in m_now:
+                        waiting = waiting or bool(m_now.get("local_vote"))
+                    else:
+                        waiting = waiting or bool(m_now.get("voted_player_ids"))
+                if waiting:
+                    waits += 1
+                    if waits > 900:
+                        await self._notify(umo, "后台托管：等了很久还在等别人，先停下。")
+                        return
+                    await asyncio.sleep(max(0.8, interval))
+                    continue
+                waits = 0
+
+                sig = f"{stype}:{zlib.crc32(json.dumps(st, ensure_ascii=False, sort_keys=True).encode())}"
+                same_count = same_count + 1 if sig == last_sig else 0
+                last_sig = sig
+                if same_count >= 20:
+                    await self._notify(umo, "后台托管：状态长时间没变化，先停下。")
+                    return
+
+                act = self.bot.next_action(st)
+                if not act:
+                    idle += 1
+                    if idle >= 30:
+                        await self._notify(
+                            umo, f"后台托管：在「{SCREEN_CN.get(stype, stype)}」不知道做什么，先停下。"
+                        )
+                        return
+                    await asyncio.sleep(interval)
+                    continue
+                idle = 0
+
+                name = str(act.get("action") or "")
+                if name in ("", "wait", "sleep"):
+                    await asyncio.sleep(interval)
+                    continue
+                params = {
+                    k: v for k, v in act.items() if k not in ("action", "tool", "think", "reason")
+                }
+                try:
+                    res = await self.client.act(name, **params)
+                except Exception:  # noqa: BLE001
+                    await asyncio.sleep(interval)
+                    continue
+                if str(res.get("status")) == "error":
+                    if _is_retryable_action_error(res):
+                        await asyncio.sleep(0.3)
+                        continue
+                    errors += 1
+                    if errors >= 10:
+                        await self._notify(
+                            umo, f"后台托管：连续失败 {errors} 次，先停下。\n{_one_line(res.get('error'), 120)}"
+                        )
+                        return
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("STS2 后台托管异常退出：%s", e)
+        finally:
+            self._autopilot = False
+            self._autopilot_task = None
+
+    async def _notify(self, umo: str, text: str) -> None:
+        """主动往会话推一条消息（后台循环没有 event，只能这样发）。
+
+        注意：`context.send_message` 在 qq_official 平台**不支持**（AstrBot 源码
+        Context.send_message 的注释里写明），会抛异常或返回 False。
+        所以这里发不出去也不能影响托管循环本身，失败就只记一条日志。
+        """
+        try:
+            from astrbot.api.event import MessageChain
+            from astrbot.api.message_components import Plain
+
+            ok = await self.context.send_message(umo, MessageChain([Plain(text)]))
+            if ok is False:
+                logger.info("STS2 托管通知（平台不支持主动发送，已跳过）：%s", text.replace("\n", " "))
+        except Exception as e:  # noqa: BLE001
+            logger.info("STS2 托管通知：%s（发送失败：%s）", text.replace("\n", " "), e)
+
+    async def _start_autopilot(self, umo: str) -> str:
+        if self._autopilot and self._autopilot_task and not self._autopilot_task.done():
+            return "后台托管已经在跑了。发 /sts2 停止托管 可以中断。"
+        try:
+            st = await self.client.state()
+        except Exception as e:  # noqa: BLE001
+            return f"读不到游戏状态，先启动游戏和队友实例：{e}"
+        self._autopilot = True
+        self._autopilot_task = asyncio.create_task(self._autopilot_loop(umo))
+        return (
+            "✅ 后台托管已启动，我会一直打下去，你不用再发指令。\n"
+            f"当前：{render_state(st).splitlines()[0] if render_state(st) else ''}\n"
+            "随时发 /sts2 停止托管 可以中断。"
+        )
+
+    async def _stop_autopilot(self, quiet: bool = False) -> bool:
+        was = self._autopilot
+        self._autopilot = False
+        task = self._autopilot_task
+        self._autopilot_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if was and not quiet:
+            logger.info("STS2 后台托管已停止")
+        return was
 
     # ---- LLM 决策 ----
     async def _ask_llm(
@@ -3236,7 +3406,11 @@ class Sts2PlayerPlugin(Star):
             return
         if sub in ("停", "stop"):
             self._stop.add(event.unified_msg_origin)
-            yield event.plain_result("已请求停止，最迟当前这一步结束后停下。")
+            stopped_bg = await self._stop_autopilot()
+            if stopped_bg:
+                yield event.plain_result("后台托管已停止，一次性的自动打牌也已请求停止。")
+            else:
+                yield event.plain_result("已请求停止，最迟当前这一步结束后停下。")
             return
         if not self._authorized(event):
             yield event.plain_result("你没有操作这台电脑上游戏的权限。")
@@ -3252,6 +3426,15 @@ class Sts2PlayerPlugin(Star):
                     return
             async for item in self._auto(event, n):
                 yield item
+            return
+
+        if sub in ("托管", "autopilot", "后台"):
+            yield event.plain_result(await self._start_autopilot(event.unified_msg_origin))
+            return
+
+        if sub in ("停止托管", "停托管", "stop_autopilot"):
+            stopped = await self._stop_autopilot()
+            yield event.plain_result("后台托管已停止。" if stopped else "后台托管本来就没在跑。")
             return
 
         if sub in ("执行", "do", "act"):
