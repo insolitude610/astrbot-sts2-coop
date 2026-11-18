@@ -1,0 +1,107 @@
+# 杀戮尖塔 2 × AstrBot 陪玩
+
+让 AstrBot 通过游戏 mod 的本地 HTTP 接口，驱动一个**离线第二实例**当 AI 队友，和你一起爬塔。
+
+> 不需要第二个 Steam 账号。用游戏自带的 FastMP 本地联机起一个 `--force-steam off` 的实例，
+> 它就能以独立玩家身份进你的大厅，外部程序通过它自己的本地 API 出牌。
+
+## 文档
+
+| 文件 | 内容 |
+|---|---|
+| [AstrBot-杀戮尖塔2-AI队友-设计方案.md](AstrBot-杀戮尖塔2-AI队友-设计方案.md) | 早期设计方案（走 AiTeammate mod 的 TCP 桥，**这条路线没走**） |
+| [2026-11-17-实测交接.md](2026-11-17-实测交接.md) | 第一轮实测：跑通「第二实例进大厅并开局」 |
+| [2026-11-18-多人适配.md](2026-11-18-多人适配.md) | 第二轮实测：多人局适配缺陷与修复（本目录代码对应这轮） |
+
+## 核心结论（截至 2026-11-18）
+
+1. **不需要第二个 Steam 账号** —— `--force-steam off` 的离线实例能进大厅
+2. **companion 角色的 `/action` 可用** —— `play_phase: paused` 只是 mod 自走循环的状态，
+   不影响外部驱动（这点第一轮没确认）
+3. 插件 `astrbot_plugin_sts2_player` v0.4.8 是**单人局打磨出来的**，多人局有 5 个真实缺陷，
+   已在 [patches/](patches/) 里修复
+
+## 打补丁
+
+[patches/sts2-player-v0.4.8-multiplayer.patch](patches/sts2-player-v0.4.8-multiplayer.patch)
+是插件 v0.4.8 的多人适配修复（+217/−14）。原文件是**纯 LF**，Windows 上应用时必须关掉换行转换，
+否则会得到 CRLF 版本（内容一样但字节不同）：
+
+```powershell
+cd <插件目录>          # 里面要有 astrbot_plugin_sts2_player/main.py
+git -c core.autocrlf=false apply <repo>\patches\sts2-player-v0.4.8-multiplayer.patch
+```
+
+已验证：对 `main.py.bak-20261118-multiplayer` 应用后 SHA256 与线上版本完全一致。
+
+## harness/ 是什么
+
+在 AstrBot 进程之外，用插件**真实代码路径**直连游戏接口做验证的脚手架。
+好处是不用重启 AstrBot、不碰 QQ 会话；代价是没有验证 AstrBot 集成链路（鉴权、`plain_result`、事件循环）。
+
+| 脚本 | 用途 |
+|---|---|
+| `sts2stub.py` | AstrBot 最小桩：让插件 `main.py` 能在 AstrBot 外被 import |
+| `sts2ctl.py` | 通用探针：`probe` / `raw-state` / `actions` / `act` / `play` / `lobby` |
+| `selfcheck.py` | **主测试**：29 项离线断言（适配层、规则层、渲染、重试判定） |
+| `map_fix_check.py` | 多人地图 4 个场景的规则层语义 |
+| `retry_check.py` | 动作被拒后的重试补丁（`--live` 走真游戏） |
+| `retry_window.py` | 量化「过期快照」窗口：0s 必败 / 0.15s+ 基本成功 |
+| `rule_check.py` | 看规则层对当前状态会做什么（不实际发动作） |
+| `duo.py` | 双实例协同驱动（**会替你操作主窗口**，只用于验证） |
+| `e2e.py` | 端到端：主机模拟真人 + 队友走插件 `_auto` |
+
+`sts2_plugin_main.py` 是 `main.py` 的副本，供 harness import 用。改动插件后需重新拷贝：
+
+```powershell
+Copy-Item "<ASTRBOT_ROOT>\data\plugins\astrbot_plugin_sts2_player\main.py" `
+          "harness\sts2_plugin_main.py" -Force
+```
+
+### 跑测试
+
+```powershell
+$v = "<ASTRBOT_ROOT>\venv\Scripts\python.exe"
+cd harness
+& $v selfcheck.py          # 离线，不需要游戏开着
+& $v map_fix_check.py      # 离线
+& $v retry_check.py        # 离线
+```
+
+## 起一局（人工）
+
+```powershell
+$g = "<GAME_DIR>"
+
+# 1. 主窗口（你自己玩）
+Start-Process "$g\SlayTheSpire2.exe" -ArgumentList '-fastmp','host_standard' -WorkingDirectory $g
+
+# 2. 队友实例（环境变量一个都不能少）
+$env:STS2_MULTIPLAYER_HOST_IP = '127.0.0.1'
+$env:STS2_MULTIPLAYER_NET_ID  = '3'          # 必须等于 --clientId
+$env:STS2_API_PORT            = '8082'
+$env:STS2_API_ALLOW_FALLBACK  = '1'
+$env:STS2_AGENT_ROLE          = 'companion'
+$env:STS2_AGENT_AUTOPLAY      = '0'          # 0 = 外部接管
+$env:STS2_AGENT_SETTINGS_PATH = "$env:APPDATA\STS2AIAgent\settings.companion.json"
+Start-Process "$g\SlayTheSpire2.exe" `
+  -ArgumentList '--windowed','--force-steam','off','--clientId','3','-fastmp','join' `
+  -WorkingDirectory $g
+```
+
+**新 clientId 首次启动必须补两个东西**（否则 mod 不加载、队友没有 API）：
+
+```powershell
+$p = "$env:APPDATA\SlayTheSpire2\default\<clientId>\settings.save"
+# 把 "mod_settings": null 换成开启 STS2AIAgent，并把 seen_ea_disclaimer 设为 true
+# 改之前务必先关掉游戏进程，否则会被覆盖
+```
+
+完整避坑清单见 [2026-11-18-多人适配.md](2026-11-18-多人适配.md)。
+
+## 已知未验证
+
+- **AstrBot 集成链路一次都没跑过**：QQ 里发 `/sts2 状态` / `/sts2 自动` 到插件的完整路径，
+  包括 `operator_ids` 鉴权、`plain_result` 回消息、插件在 AstrBot 事件循环里的表现
+- **没有完整打通一整局**：每次都在第 1 幕被反复重启打断
+- **LLM 决策路径未测**：所有测试都是 `use_llm=false` 的零 token 规则层

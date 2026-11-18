@@ -1,0 +1,22 @@
+# --- 测试产物：抓下来的原始状态快照，体积大且可随时重抓 ---
+harness/*.json
+harness/state_raw.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- 本地私密配置（含 openid / 端口 / token 的一律不进库） ---
+*.local.json
+secrets/

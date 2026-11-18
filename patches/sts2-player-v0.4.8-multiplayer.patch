@@ -1,0 +1,338 @@
+diff --git a/astrbot_plugin_sts2_player/main.py b/b/astrbot_plugin_sts2_player/main.py
+index 231509e..67b13aa 100644
+--- a/astrbot_plugin_sts2_player/main.py
++++ b/astrbot_plugin_sts2_player/main.py
+@@ -88,6 +88,26 @@ SCREEN_CN = {
+ 
+ COMBAT_SCREENS = ("monster", "elite", "boss")
+ 
++# 多人局里「别人刚动过」会让本方快照瞬间过期，引擎用这两种错误把你挡回来。
++# 实测（2026-11-18，v0.113.1 + STS2-Agent v0.19.2，双人联机）：
++#   人类玩家出牌后，队友用 0 秒延迟立刻出牌 → 100% 被 invalid_action 拒掉；
++#   0.15s / 0.3s / 0.5s / 0.8s 延迟 → 全部成功。
++# 所以这里不能当成硬错误累计（旧实现累计 3 次就整局停下），要重读状态再试。
++RETRYABLE_ACTION_ERRORS = (
++    "invalid_action",
++    "action_in_flight",
++    "stale",
++    "not_available",
++)
++MAX_ACTION_RETRIES = 4
++RETRY_BACKOFF_SEC = 0.25
++
++
++def _is_retryable_action_error(res: dict) -> bool:
++    text = str(res.get("error") or "").lower()
++    return any(k in text for k in RETRYABLE_ACTION_ERRORS)
++
++
+ # 只在这些界面上问模型。菜单/浮层/结算这种「按钮在哪」的事情规则层一次就对，
+ # 交给模型反而会被它编出 menu_select 这种老后端才有的动作。
+ LLM_SCREENS = COMBAT_SCREENS + (
+@@ -374,8 +394,33 @@ class Sts2Client:
+         st = str(d.get("status") or "completed")
+         if st == "failed":
+             return {"status": "error", "error": d.get("message") or "动作执行失败"}
++        # 多人局里动作常常「已受理但转场还没结束」（status=pending / stable=false）。
++        # 这时候界面还没换，立刻读状态会看到旧界面，误以为动作没生效。
++        # 等一会儿再看：转场结束后要么界面变了，要么动作确实没落地。
++        if st in ("pending", "queued", "accepted") or d.get("stable") is False:
++            await self._wait_transition()
++            return {"status": "ok", "message": d.get("message") or st}
+         return {"status": "ok", "message": d.get("message") or st}
+ 
++    async def _wait_transition(self, timeout: float = 3.0) -> None:
++        """等游戏把转场走完：state_version 连续两次相同（或超时）就认为稳定。"""
++        import time as _time
++
++        deadline = _time.monotonic() + timeout
++        prev = None
++        while _time.monotonic() < deadline:
++            await asyncio.sleep(0.2)
++            try:
++                status, data = await self._json("GET", "/state")
++            except Sts2Error:
++                return
++            if status != 200 or not data.get("ok"):
++                return
++            ver = (data.get("data") or {}).get("state_version")
++            if prev is not None and ver == prev:
++                return
++            prev = ver
++
+     async def _post_action(self, native: str, payload: dict) -> tuple[int, dict]:
+         body: dict[str, Any] = {"action": native}
+         body.update({k: v for k, v in payload.items() if v is not None})
+@@ -588,6 +633,23 @@ def agent_to_legacy(d: dict) -> dict:
+             "turn": "player" if readi.get("player_action_phase") else "enemy",
+             "is_play_phase": bool(readi.get("can_use_combat_actions"))
+             and bool(readi.get("player_action_phase")),
++            # 多人局：自己已经按了结束回合，正在等别人 —— 这时候不能再去点 end_turn，
++            # 也不能当成「敌方回合」空等（那会一直循环到超时）。
++            "waiting_for_players": bool(readi.get("local_ready_to_end_turn"))
++            and not bool(readi.get("all_players_ready_to_end_turn")),
++            "players": [
++                {
++                    "player_id": p.get("player_id"),
++                    "is_local": bool(p.get("is_local")),
++                    "name": p.get("character_name") or p.get("character_id"),
++                    "hp": p.get("current_hp") or 0,
++                    "max_hp": p.get("max_hp") or 0,
++                    "block": p.get("block") or 0,
++                    "energy": p.get("energy") or 0,
++                    "is_alive": bool(p.get("is_alive", True)),
++                }
++                for p in (combat.get("players") or [])
++            ],
+             # 游戏自己算过「这回合结束会死」，是最可靠的保命信号
+             "lethal": bool(combat.get("end_turn_will_kill_player")),
+             "enemies": enemies,
+@@ -595,6 +657,7 @@ def agent_to_legacy(d: dict) -> dict:
+ 
+     if screen == "MAP":
+         m = d.get("map") or {}
++        acts_now = [str(a) for a in (d.get("available_actions") or [])]
+         out["map"] = {
+             "current_position": m.get("current_node") or {},
+             "next_options": [
+@@ -607,6 +670,15 @@ def agent_to_legacy(d: dict) -> dict:
+                 for n in m.get("available_nodes") or []
+             ],
+             "boss": (m.get("boss_node") or {}),
++            # 多人局：投票前 choose_map_node 在可用动作里；投完就消失，等别人投。
++            # 单人局这两个字段永远是 False/空，不影响老行为。
++            "can_vote": "choose_map_node" in acts_now,
++            "local_vote": m.get("local_vote"),
++            "voted_player_ids": [
++                str(v.get("player_id"))
++                for v in (m.get("player_votes") or [])
++                if v.get("coord")
++            ],
+         }
+ 
+     if screen == "REWARD":
+@@ -661,6 +733,8 @@ def agent_to_legacy(d: dict) -> dict:
+                     "description": o.get("description") or "",
+                     "is_locked": bool(o.get("is_locked")),
+                     "is_proceed": bool(o.get("is_proceed")),
++                    # 引擎自己算的「选这个会死」，比按文字猜可靠得多
++                    "will_kill_player": bool(o.get("will_kill_player")),
+                 }
+                 for o in ev.get("options") or []
+             ],
+@@ -1104,11 +1178,24 @@ def render_state(st: dict, *, pile_limit: int = 8) -> str:
+     if stype in COMBAT_SCREENS + ("hand_select",) and battle:
+         turn = battle.get("turn")
+         phase = "你的回合" if battle.get("is_play_phase") else ("敌方回合" if turn == "enemy" else "结算中")
++        # 多人局：自己结束回合后要等所有人，说得直白点，否则看着像卡住了
++        if battle.get("waiting_for_players"):
++            phase += "（已结束回合，等队友）"
+         lines.append(
+             f"⚔ 第{battle.get('round', '?')}轮 · {phase}"
+             f" · 能量 {player.get('energy', 0)}/{player.get('max_energy', 0)}"
+             f" · 护甲 {player.get('block', 0)}"
+         )
++        if battle.get("players"):
++            mates = "，".join(
++                f"{p.get('name') or p.get('character') or p.get('player_id')} "
++                f"{p.get('hp')}/{p.get('max_hp')}HP"
++                + ("" if p.get("is_alive", True) else "(倒地)")
++                for p in battle["players"]
++                if not p.get("is_local")
++            )
++            if mates:
++                lines.append(f"  队友：{mates}")
+         lines.append(
+             f"  抽牌堆 {player.get('draw_pile_count', 0)}"
+             f" / 弃牌堆 {player.get('discard_pile_count', 0)}"
+@@ -1392,6 +1479,14 @@ class RuleBot:
+         stype = str(st.get("state_type") or "")
+         if stype not in ("shop", "fake_merchant"):
+             self._bad_buys.clear()
++        # 药水槽满了领不了药水奖励，引擎会把 discard_potion 加进可用动作。
++        # 没人消费这个动作的话，claim_reward 会一直失败累计 3 次把整局停下。
++        if stype in ("rewards", "treasure") and "discard_potion" in (
++            str(a) for a in st.get("available_actions") or []
++        ):
++            potions = (st.get("player") or {}).get("potions") or []
++            if potions:
++                return {"action": "discard_potion", "slot": potions[0].get("slot")}
+         if stype in COMBAT_SCREENS:
+             return self._combat(st)
+         handler = {
+@@ -1451,6 +1546,10 @@ class RuleBot:
+     def _combat(self, st: dict) -> dict | None:
+         battle = st.get("battle") or {}
+         player = st.get("player") or {}
++        # 多人局：自己已经结束回合、正等别人时，再发 end_turn 没有意义（也不会推进），
++        # 当成「等」处理，让上层重新读状态空转，别把步数预算耗在重复按键上。
++        if battle.get("waiting_for_players"):
++            return {"action": "wait"}
+         if not battle.get("is_play_phase") or battle.get("turn") == "enemy":
+             return {"action": "wait"}
+ 
+@@ -1740,9 +1839,17 @@ class RuleBot:
+         return {"action": "skip_card_reward"}
+ 
+     def _map(self, st: dict) -> dict | None:
+-        opts = (st.get("map") or {}).get("next_options") or []
+-        if not opts:
++        m = st.get("map") or {}
++        opts = m.get("next_options") or []
++        acts = [str(a) for a in st.get("available_actions") or []]
++        # 多人局：本方还没投票 → 投一票；已经投过 → 等别人，别当成「不认识的界面」停下。
++        # （v0.4.8 之前这里直接 return None，多人局一投票 AstrBot 就整局卡死在地图。）
++        if "choose_map_node" not in acts:
++            if m.get("local_vote") or m.get("voted_player_ids"):
++                return {"action": "wait"}
+             return None
++        if not opts:
++            return {"action": "wait"}
+         player = st.get("player") or {}
+         hp = float(player.get("hp") or 0)
+         max_hp = float(player.get("max_hp") or 1) or 1.0
+@@ -1776,10 +1883,39 @@ class RuleBot:
+         if not opts:
+             return None
+         player = st.get("player") or {}
+-        hp_ratio = float(player.get("hp") or 0) / (float(player.get("max_hp") or 1) or 1.0)
++        hp = float(player.get("hp") or 0)
++        max_hp = float(player.get("max_hp") or 1) or 1.0
++        hp_ratio = hp / max_hp
+         gold = int(player.get("gold") or 0)
+         leaves = [o for o in opts if o.get("is_proceed")]
+         real = [o for o in opts if not o.get("is_proceed")] or leaves
++
++        # 引擎自己会标 will_kill_player（这一项会把你打死），比任何启发式都可靠，
++        # 先把它剔掉；全都被标成致死才退回原逻辑。
++        not_fatal = [o for o in real if not o.get("will_kill_player")]
++        if not_fatal:
++            real = not_fatal
++        elif leaves:
++            best = leaves[0]
++            return {"action": "choose_event_option", "index": best.get("index")}
++
++        # 保命优先：血少到下一场战斗必死时，宁可不拿奖励也别选掉血项。
++        # 真机实测（多人局 2026-11-18）：一个连续选择的事件把 75HP 一路扣到 1HP，
++        # 因为「获得遗物 +12」把「失去生命 -10」抵消了，评分反而更高。
++        if hp <= 15 or hp_ratio < 0.25:
++            bleeding = [
++                o
++                for o in real
++                if any(k in _strip_bbcode(f"{o.get('title') or ''} {o.get('description') or ''}")
++                       for k in ("失去", "受伤", "生命", "hp", "HP"))
++            ]
++            safe = [o for o in real if o not in bleeding]
++            if safe:
++                best = max(safe, key=lambda o: _event_option_score(o, hp_ratio, gold))
++                return {"action": "choose_event_option", "index": best.get("index")}
++            if leaves:
++                return {"action": "choose_event_option", "index": leaves[0].get("index")}
++
+         best = max(real, key=lambda o: _event_option_score(o, hp_ratio, gold))
+         return {"action": "choose_event_option", "index": best.get("index")}
+ 
+@@ -2702,6 +2838,7 @@ class Sts2PlayerPlugin(Star):
+         self._stop.discard(umo)
+         log: list[str] = []
+         errors = 0
++        retries = 0
+         last_sig = ""
+         same_count = 0
+         report: list[str] = []
+@@ -2735,15 +2872,18 @@ class Sts2PlayerPlugin(Star):
+                     continue
+ 
+                 sig = f"{stype}:{zlib.crc32(json.dumps(st, ensure_ascii=False, sort_keys=True).encode())}"
+-                # 敌人回合 / 动画结算里状态本来就不会变：等，而且不占「步数」预算
+-                waiting = stype in COMBAT_SCREENS and not (st.get("battle") or {}).get(
+-                    "is_play_phase"
++                # 敌人回合 / 动画结算里状态本来就不会变：等，而且不占「步数」预算。
++                # 多人局里「自己已结束回合、等队友」也属于这一类，否则会被当成卡住。
++                battle_now = st.get("battle") or {}
++                waiting = stype in COMBAT_SCREENS and (
++                    not battle_now.get("is_play_phase")
++                    or bool(battle_now.get("waiting_for_players"))
+                 )
+                 if waiting:
+                     waits += 1
+                     if waits > 600:
+                         yield event.plain_result(
+-                            "等了很久还没轮到我出手（敌人回合卡住了？），先停下。\n"
++                            "等了很久还没轮到我出手（等队友 / 敌人回合卡住了？），先停下。\n"
+                             + render_state(st)
+                         )
+                         return
+@@ -2833,24 +2973,57 @@ class Sts2PlayerPlugin(Star):
+                         yield event.plain_result(f"调用游戏失败：{e}")
+                         return
+                     if str(res.get("status")) == "error":
+-                        errors += 1
+-                        if name == "shop_purchase":
+-                            # 这一格买不了（买不起 / 药水位满 / 已售出），本次进店就别再试它
+-                            try:
+-                                self.bot._bad_buys.add((params.get("category"), params.get("index")))
+-                            except Exception:  # noqa: BLE001
+-                                pass
+-                        log.append(f"✗ {name} {params} → {_one_line(res.get('error'), 100)}")
+-                        if errors >= 3:
+-                            yield event.plain_result(
+-                                "连续失败 3 次，先停下。最近：\n"
+-                                + "\n".join(log[-6:])
+-                                + "\n\n"
+-                                + render_state(await self.client.state())
++                        # 多人局里「另一个玩家刚动过」会让本方快照瞬间过期，引擎回
++                        # invalid_action / action_in_flight。这不是真错误：重读状态再发一次就好
++                        # （实测同一动作 0 秒重试必失败、0.15 秒后基本成功）。
++                        if _is_retryable_action_error(res) and retries < MAX_ACTION_RETRIES:
++                            retries += 1
++                            log.append(
++                                f"↻ {name} {params} 被拒（{_one_line(res.get('error'), 60)}），"
++                                f"重读状态后重试 {retries}/{MAX_ACTION_RETRIES}"
++                            )
++                            await asyncio.sleep(RETRY_BACKOFF_SEC * retries)
++                            st = await self.client.state()
++                            retry_act = self.bot.next_action(st)
++                            if retry_act and retry_act.get("action") not in (None, "wait", "sleep"):
++                                retry_params = {
++                                    k: v
++                                    for k, v in retry_act.items()
++                                    if k not in ("action", "tool", "think", "reason")
++                                }
++                                try:
++                                    res = await self.client.act(
++                                        retry_act.get("action"), **retry_params
++                                    )
++                                except Sts2Error as e:
++                                    yield event.plain_result(f"调用游戏失败：{e}")
++                                    return
++                            else:
++                                continue
++                        if str(res.get("status")) == "error":
++                            errors += 1
++                            if name == "shop_purchase":
++                                # 这一格买不了（买不起 / 药水位满 / 已售出），本次进店就别再试它
++                                try:
++                                    self.bot._bad_buys.add(
++                                        (params.get("category"), params.get("index"))
++                                    )
++                                except Exception:  # noqa: BLE001
++                                    pass
++                            log.append(
++                                f"✗ {name} {params} → {_one_line(res.get('error'), 100)}"
+                             )
+-                            return
++                            if errors >= 3:
++                                yield event.plain_result(
++                                    "连续失败 3 次，先停下。最近：\n"
++                                    + "\n".join(log[-6:])
++                                    + "\n\n"
++                                    + render_state(await self.client.state())
++                                )
++                                return
+                     else:
+                         errors = 0
++                        retries = 0
+                         log.append(f"✓ {name} {params} → {_one_line(res.get('message'), 80)}")
+ 
+                 i += 1
