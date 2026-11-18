@@ -1,0 +1,22 @@
+fix: 后端识别缓存锁死导致 404（AstrBot 实测暴露的 D6）
+
+现象：QQ 里发 /sts2 状态 返回
+  HTTP 404 {"error":{"code":"not_found","message":"Route not found."}}
+不是「连不上」，是连上了但请求了老 STS2_MCP 才有的 /api/v1/singleplayer。
+
+根因：Sts2Client.detect() 把识别结果缓存在 _mode，且连接失败时也缓存。
+只要第一次请求时游戏没开（队友实例晚于 AstrBot 启动，这是正常顺序），
+_mode 就被永久写成 "mcp"，之后游戏起来了也只会打 MCP 路由，永远 404，
+只能重启 AstrBot 才能恢复。多人联机下几乎必然踩到。
+
+修法：
+- 失败时不写 _mode（本次按 mcp 处理，下次重新探测）
+- MCP 分支拿到 404 时 _reset_mode() 重新识别，成功则按 agent 重试一次
+- 新增 _configured_url 记住用户配置的地址，_reset_mode() 时退回去
+  （原实现会把 base_url 换成探测到的 8080/15526 并永久保留）
+
+验证：harness/detect_fix_check.py 12/12 通过，含「人为锁成 mcp 后
+state() 能自愈」的真机用例。原有 selfcheck 29/29、map_fix_check、
+retry_check 全部无回归。
+
+补丁已重新生成，验证可对上游 v0.4.8 完整还原（SHA256 一致）。

@@ -193,6 +193,9 @@ class Sts2Client:
 
     def __init__(self, base_url: str = DEFAULT_URL, timeout: float = 20.0):
         self.base_url = base_url.rstrip("/")
+        # 用户配置的原始地址。detect() 可能把它换成另一个后端的默认端口，
+        # 记住原值才能在 _reset_mode() 时退回去。
+        self._configured_url = self.base_url
         self.timeout = timeout
         self._session: aiohttp.ClientSession | None = None
         self._mode: str | None = None
@@ -244,23 +247,31 @@ class Sts2Client:
 
         两个后端的默认端口不同（STS2-Agent 8080 / STS2_MCP 15526），配置写错一个数字
         就整晚连不上，所以这里顺手把另一个端口也试一下，连上了就自动改过来。
+
+        注意：**只有确认成功才缓存 `_mode`**。v0.4.8 原来在连接失败时也把
+        `_mode` 设成 "mcp" 并永久缓存，导致「第一次请求时游戏没开」会把这个
+        Client 永久锁在 MCP 分支，之后游戏起来了也一直请求 `/api/v1/singleplayer`
+        这个 STS2-Agent 根本没有的路由，永远 404 —— 只有重启 AstrBot 才能恢复。
+        多人联机下队友实例本来就会晚起来，这个坑必然踩到。
         """
         if self._mode:
             return self._mode
         try:
             status, data = await self._json("GET", "/health")
         except Sts2Error:
+            # 主地址不通：试一下另一个后端的默认端口。全都连不上就本次按 mcp 处理，
+            # 但**不写 _mode**，下次调用（游戏起来之后）还会重新探测。
             for alt in self._alt_urls():
                 try:
                     status, data = await self._json_at(alt, "GET", "/health")
                 except Sts2Error:
                     continue
                 logger.info("STS2 接口在 %s 上，自动切过去。", alt)
+                self._configured_url = alt
                 self.base_url = alt
                 break
             else:
-                self._mode = "mcp"
-                return self._mode
+                return "mcp"
         inner = data.get("data") if isinstance(data, dict) else None
         if status == 200 and isinstance(inner, dict) and str(
             inner.get("service", "")
@@ -270,6 +281,13 @@ class Sts2Client:
             self._mode = "mcp"
         logger.info("STS2 后端识别为：%s", self._mode)
         return self._mode
+
+    def _reset_mode(self) -> None:
+        """忘掉已识别的后端，下次 detect() 重新探。连接状态变化时用。"""
+        self._mode = None
+        # 自动切过的地址也退回去：否则「8080 恰好是别的服务」会被一直用下去
+        if getattr(self, "_configured_url", None):
+            self.base_url = self._configured_url
 
     def _alt_urls(self) -> list[str]:
         out: list[str] = []
@@ -353,9 +371,37 @@ class Sts2Client:
             # 留着原始那一坨，调试界面形状时用得上（见 tools/live_plugin.py）
             self.last_raw = payload
             return agent_to_legacy(payload)
-        return await self.request(
-            "GET", "/api/v1/singleplayer", params={"format": fmt}
-        )
+        return await self._mcp_state_or_redetect(fmt)
+
+    async def _mcp_state_or_redetect(self, fmt: str) -> dict:
+        """按 MCP 后端读状态；如果这个路由不存在，说明认错了后端，重新探一次。
+
+        v0.4.8 的 `_mode` 一旦在「游戏没开」时被缓存成 mcp，之后游戏起来了也
+        只会一直打 `/api/v1/singleplayer` 拿 404，只能重启 AstrBot 才能恢复。
+        这里在拿到 404 时自动 `_reset_mode()` 并按新识别结果重试一次，
+        让「先开 AstrBot 后开游戏」这种正常顺序也能自愈。
+        """
+        try:
+            return await self.request(
+                "GET", "/api/v1/singleplayer", params={"format": fmt}
+            )
+        except Sts2Error as e:
+            if "HTTP 404" not in str(e):
+                raise
+            self._reset_mode()
+            if await self.detect() != "agent":
+                raise
+            logger.info("STS2 后端认错了（MCP 路由 404），已切到 agent 重试。")
+            status, data = await self._json("GET", "/state")
+            if status != 200 or not data.get("ok"):
+                err = data.get("error") or {}
+                raise Sts2Error(
+                    f"读游戏状态失败：{err.get('code') or status} "
+                    f"{err.get('message') or str(data)[:160]}"
+                ) from e
+            payload = data.get("data") or {}
+            self.last_raw = payload
+            return agent_to_legacy(payload)
 
     async def act(self, action: str, **params: Any) -> dict:
         mode = await self.detect()

@@ -1,5 +1,5 @@
 diff --git a/astrbot_plugin_sts2_player/main.py b/b/astrbot_plugin_sts2_player/main.py
-index 231509e..67b13aa 100644
+index 231509e..2f3b219 100644
 --- a/astrbot_plugin_sts2_player/main.py
 +++ b/astrbot_plugin_sts2_player/main.py
 @@ -88,6 +88,26 @@ SCREEN_CN = {
@@ -29,7 +29,106 @@ index 231509e..67b13aa 100644
  # 只在这些界面上问模型。菜单/浮层/结算这种「按钮在哪」的事情规则层一次就对，
  # 交给模型反而会被它编出 menu_select 这种老后端才有的动作。
  LLM_SCREENS = COMBAT_SCREENS + (
-@@ -374,8 +394,33 @@ class Sts2Client:
+@@ -173,6 +193,9 @@ class Sts2Client:
+ 
+     def __init__(self, base_url: str = DEFAULT_URL, timeout: float = 20.0):
+         self.base_url = base_url.rstrip("/")
++        # 用户配置的原始地址。detect() 可能把它换成另一个后端的默认端口，
++        # 记住原值才能在 _reset_mode() 时退回去。
++        self._configured_url = self.base_url
+         self.timeout = timeout
+         self._session: aiohttp.ClientSession | None = None
+         self._mode: str | None = None
+@@ -224,23 +247,31 @@ class Sts2Client:
+ 
+         两个后端的默认端口不同（STS2-Agent 8080 / STS2_MCP 15526），配置写错一个数字
+         就整晚连不上，所以这里顺手把另一个端口也试一下，连上了就自动改过来。
++
++        注意：**只有确认成功才缓存 `_mode`**。v0.4.8 原来在连接失败时也把
++        `_mode` 设成 "mcp" 并永久缓存，导致「第一次请求时游戏没开」会把这个
++        Client 永久锁在 MCP 分支，之后游戏起来了也一直请求 `/api/v1/singleplayer`
++        这个 STS2-Agent 根本没有的路由，永远 404 —— 只有重启 AstrBot 才能恢复。
++        多人联机下队友实例本来就会晚起来，这个坑必然踩到。
+         """
+         if self._mode:
+             return self._mode
+         try:
+             status, data = await self._json("GET", "/health")
+         except Sts2Error:
++            # 主地址不通：试一下另一个后端的默认端口。全都连不上就本次按 mcp 处理，
++            # 但**不写 _mode**，下次调用（游戏起来之后）还会重新探测。
+             for alt in self._alt_urls():
+                 try:
+                     status, data = await self._json_at(alt, "GET", "/health")
+                 except Sts2Error:
+                     continue
+                 logger.info("STS2 接口在 %s 上，自动切过去。", alt)
++                self._configured_url = alt
+                 self.base_url = alt
+                 break
+             else:
+-                self._mode = "mcp"
+-                return self._mode
++                return "mcp"
+         inner = data.get("data") if isinstance(data, dict) else None
+         if status == 200 and isinstance(inner, dict) and str(
+             inner.get("service", "")
+@@ -251,6 +282,13 @@ class Sts2Client:
+         logger.info("STS2 后端识别为：%s", self._mode)
+         return self._mode
+ 
++    def _reset_mode(self) -> None:
++        """忘掉已识别的后端，下次 detect() 重新探。连接状态变化时用。"""
++        self._mode = None
++        # 自动切过的地址也退回去：否则「8080 恰好是别的服务」会被一直用下去
++        if getattr(self, "_configured_url", None):
++            self.base_url = self._configured_url
++
+     def _alt_urls(self) -> list[str]:
+         out: list[str] = []
+         for port in ("8080", "15526"):
+@@ -333,9 +371,37 @@ class Sts2Client:
+             # 留着原始那一坨，调试界面形状时用得上（见 tools/live_plugin.py）
+             self.last_raw = payload
+             return agent_to_legacy(payload)
+-        return await self.request(
+-            "GET", "/api/v1/singleplayer", params={"format": fmt}
+-        )
++        return await self._mcp_state_or_redetect(fmt)
++
++    async def _mcp_state_or_redetect(self, fmt: str) -> dict:
++        """按 MCP 后端读状态；如果这个路由不存在，说明认错了后端，重新探一次。
++
++        v0.4.8 的 `_mode` 一旦在「游戏没开」时被缓存成 mcp，之后游戏起来了也
++        只会一直打 `/api/v1/singleplayer` 拿 404，只能重启 AstrBot 才能恢复。
++        这里在拿到 404 时自动 `_reset_mode()` 并按新识别结果重试一次，
++        让「先开 AstrBot 后开游戏」这种正常顺序也能自愈。
++        """
++        try:
++            return await self.request(
++                "GET", "/api/v1/singleplayer", params={"format": fmt}
++            )
++        except Sts2Error as e:
++            if "HTTP 404" not in str(e):
++                raise
++            self._reset_mode()
++            if await self.detect() != "agent":
++                raise
++            logger.info("STS2 后端认错了（MCP 路由 404），已切到 agent 重试。")
++            status, data = await self._json("GET", "/state")
++            if status != 200 or not data.get("ok"):
++                err = data.get("error") or {}
++                raise Sts2Error(
++                    f"读游戏状态失败：{err.get('code') or status} "
++                    f"{err.get('message') or str(data)[:160]}"
++                ) from e
++            payload = data.get("data") or {}
++            self.last_raw = payload
++            return agent_to_legacy(payload)
+ 
+     async def act(self, action: str, **params: Any) -> dict:
+         mode = await self.detect()
+@@ -374,8 +440,33 @@ class Sts2Client:
          st = str(d.get("status") or "completed")
          if st == "failed":
              return {"status": "error", "error": d.get("message") or "动作执行失败"}
@@ -63,7 +162,7 @@ index 231509e..67b13aa 100644
      async def _post_action(self, native: str, payload: dict) -> tuple[int, dict]:
          body: dict[str, Any] = {"action": native}
          body.update({k: v for k, v in payload.items() if v is not None})
-@@ -588,6 +633,23 @@ def agent_to_legacy(d: dict) -> dict:
+@@ -588,6 +679,23 @@ def agent_to_legacy(d: dict) -> dict:
              "turn": "player" if readi.get("player_action_phase") else "enemy",
              "is_play_phase": bool(readi.get("can_use_combat_actions"))
              and bool(readi.get("player_action_phase")),
@@ -87,7 +186,7 @@ index 231509e..67b13aa 100644
              # 游戏自己算过「这回合结束会死」，是最可靠的保命信号
              "lethal": bool(combat.get("end_turn_will_kill_player")),
              "enemies": enemies,
-@@ -595,6 +657,7 @@ def agent_to_legacy(d: dict) -> dict:
+@@ -595,6 +703,7 @@ def agent_to_legacy(d: dict) -> dict:
  
      if screen == "MAP":
          m = d.get("map") or {}
@@ -95,7 +194,7 @@ index 231509e..67b13aa 100644
          out["map"] = {
              "current_position": m.get("current_node") or {},
              "next_options": [
-@@ -607,6 +670,15 @@ def agent_to_legacy(d: dict) -> dict:
+@@ -607,6 +716,15 @@ def agent_to_legacy(d: dict) -> dict:
                  for n in m.get("available_nodes") or []
              ],
              "boss": (m.get("boss_node") or {}),
@@ -111,7 +210,7 @@ index 231509e..67b13aa 100644
          }
  
      if screen == "REWARD":
-@@ -661,6 +733,8 @@ def agent_to_legacy(d: dict) -> dict:
+@@ -661,6 +779,8 @@ def agent_to_legacy(d: dict) -> dict:
                      "description": o.get("description") or "",
                      "is_locked": bool(o.get("is_locked")),
                      "is_proceed": bool(o.get("is_proceed")),
@@ -120,7 +219,7 @@ index 231509e..67b13aa 100644
                  }
                  for o in ev.get("options") or []
              ],
-@@ -1104,11 +1178,24 @@ def render_state(st: dict, *, pile_limit: int = 8) -> str:
+@@ -1104,11 +1224,24 @@ def render_state(st: dict, *, pile_limit: int = 8) -> str:
      if stype in COMBAT_SCREENS + ("hand_select",) and battle:
          turn = battle.get("turn")
          phase = "你的回合" if battle.get("is_play_phase") else ("敌方回合" if turn == "enemy" else "结算中")
@@ -145,7 +244,7 @@ index 231509e..67b13aa 100644
          lines.append(
              f"  抽牌堆 {player.get('draw_pile_count', 0)}"
              f" / 弃牌堆 {player.get('discard_pile_count', 0)}"
-@@ -1392,6 +1479,14 @@ class RuleBot:
+@@ -1392,6 +1525,14 @@ class RuleBot:
          stype = str(st.get("state_type") or "")
          if stype not in ("shop", "fake_merchant"):
              self._bad_buys.clear()
@@ -160,7 +259,7 @@ index 231509e..67b13aa 100644
          if stype in COMBAT_SCREENS:
              return self._combat(st)
          handler = {
-@@ -1451,6 +1546,10 @@ class RuleBot:
+@@ -1451,6 +1592,10 @@ class RuleBot:
      def _combat(self, st: dict) -> dict | None:
          battle = st.get("battle") or {}
          player = st.get("player") or {}
@@ -171,7 +270,7 @@ index 231509e..67b13aa 100644
          if not battle.get("is_play_phase") or battle.get("turn") == "enemy":
              return {"action": "wait"}
  
-@@ -1740,9 +1839,17 @@ class RuleBot:
+@@ -1740,9 +1885,17 @@ class RuleBot:
          return {"action": "skip_card_reward"}
  
      def _map(self, st: dict) -> dict | None:
@@ -191,7 +290,7 @@ index 231509e..67b13aa 100644
          player = st.get("player") or {}
          hp = float(player.get("hp") or 0)
          max_hp = float(player.get("max_hp") or 1) or 1.0
-@@ -1776,10 +1883,39 @@ class RuleBot:
+@@ -1776,10 +1929,39 @@ class RuleBot:
          if not opts:
              return None
          player = st.get("player") or {}
@@ -232,7 +331,7 @@ index 231509e..67b13aa 100644
          best = max(real, key=lambda o: _event_option_score(o, hp_ratio, gold))
          return {"action": "choose_event_option", "index": best.get("index")}
  
-@@ -2702,6 +2838,7 @@ class Sts2PlayerPlugin(Star):
+@@ -2702,6 +2884,7 @@ class Sts2PlayerPlugin(Star):
          self._stop.discard(umo)
          log: list[str] = []
          errors = 0
@@ -240,7 +339,7 @@ index 231509e..67b13aa 100644
          last_sig = ""
          same_count = 0
          report: list[str] = []
-@@ -2735,15 +2872,18 @@ class Sts2PlayerPlugin(Star):
+@@ -2735,15 +2918,18 @@ class Sts2PlayerPlugin(Star):
                      continue
  
                  sig = f"{stype}:{zlib.crc32(json.dumps(st, ensure_ascii=False, sort_keys=True).encode())}"
@@ -263,7 +362,7 @@ index 231509e..67b13aa 100644
                              + render_state(st)
                          )
                          return
-@@ -2833,24 +2973,57 @@ class Sts2PlayerPlugin(Star):
+@@ -2833,24 +3019,57 @@ class Sts2PlayerPlugin(Star):
                          yield event.plain_result(f"调用游戏失败：{e}")
                          return
                      if str(res.get("status")) == "error":
