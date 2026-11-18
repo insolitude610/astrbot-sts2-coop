@@ -128,5 +128,10 @@
     "description": "两次主动询问之间至少间隔多少秒",
     "type": "float",
     "default": 300.0
+  },
+  "nudge_use_llm": {
+    "description": "主动询问时是否让模型结合最近聊天内容生成自然的话（关掉则发固定文案，省 token）",
+    "type": "bool",
+    "default": true
   }
 }

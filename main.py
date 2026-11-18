@@ -2814,12 +2814,18 @@ class Sts2PlayerPlugin(Star):
                         nudges += 1
                         last_nudge = now2
                         who = "队友" if battle_now.get("waiting_for_players") else "你"
-                        await self._notify(
-                            umo,
-                            f"（托管中）已经等了 {int(waited_sec)} 秒，还在等{who}"
-                            f"{'出牌' if stype in COMBAT_SCREENS else '投票'}。"
-                            f"需要我继续等，还是先停一下？",
-                        )
+                        # 交给模型结合最近对话生成一句自然的问话（可配置关掉）
+                        if bool(self._cfg("nudge_use_llm", True)):
+                            nudge_msg = await self._nudge_text(
+                                umo, int(waited_sec), stype, who, st
+                            )
+                        else:
+                            nudge_msg = (
+                                f"（托管中）已经等了 {int(waited_sec)} 秒，还在等{who}"
+                                f"{'出牌' if stype in COMBAT_SCREENS else '投票'}。"
+                                f"需要我继续等，还是先停一下？"
+                            )
+                        await self._notify(umo, nudge_msg)
                     await asyncio.sleep(max(0.8, interval))
                     continue
                 waits = 0
@@ -2886,6 +2892,64 @@ class Sts2PlayerPlugin(Star):
         except asyncio.CancelledError:
             return
         self._paused_for_chat = False
+
+    async def _nudge_text(self, umo: str, waited: int, stype: str, who: str, st: dict) -> str:
+        """让模型结合最近对话，生成一句自然的「卡住了」询问。
+
+        失败时回退到固定文案——询问只是锦上添花，绝不能因为模型出问题就静默
+        （玩家会以为 bot 死了）。
+        """
+        fallback = (
+            f"（托管中）已经等了 {waited} 秒，还在等{who}"
+            f"{'出牌' if stype in COMBAT_SCREENS else '投票'}。需要我继续等，还是先停一下？"
+        )
+        try:
+            provider = self.context.get_using_provider(umo)
+            if provider is None:
+                return fallback
+
+            # 读最近几轮对话，让问话能接上你们刚才聊的东西
+            history = ""
+            try:
+                conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
+                if conv_id:
+                    ctxs, _total = await self.context.conversation_manager.get_human_readable_context(
+                        umo, conv_id, page=1, page_size=6
+                    )
+                    if ctxs:
+                        history = "\n".join(str(c) for c in ctxs[-6:])
+            except Exception:  # noqa: BLE001
+                history = ""
+
+            situation = render_state(st) if st else ""
+            prompt = (
+                "你正在和玩家一起玩《杀戮尖塔 2》，你在替他/和她一起打这局。\n"
+                f"现在游戏卡住了：已经等了 {waited} 秒，还在等{who}"
+                f"{'出牌' if stype in COMBAT_SCREENS else '投票'}。\n\n"
+                + (f"【当前局面】\n{situation}\n\n" if situation else "")
+                + (f"【最近的聊天记录】\n{history}\n\n" if history else "")
+                + "请用你自己的语气，简短地问玩家一句（一两句话，别超过 60 字）："
+                "说清楚现在卡在哪、要不要继续等。可以自然带一句刚才聊过的内容，"
+                "但不要复述局面原文，也不要输出任何 JSON 或格式标记。"
+            )
+            resp = await provider.text_chat(
+                prompt=prompt,
+                system_prompt=(
+                    "你是一个正在陪玩家玩游戏的伙伴，说话自然口语化。"
+                    "只输出你要对玩家说的那一句话，不要解释、不要加引号、不要加前缀。"
+                ),
+            )
+            text = (getattr(resp, "completion_text", "") or "").strip()
+            # 去掉模型可能加的引号/前缀
+            text = text.strip().strip('"').strip("「").strip("」").strip()
+            if text.startswith("回复：") or text.startswith("回复:"):
+                text = text[3:].strip()
+            if not text or len(text) > 200:
+                return fallback
+            return text
+        except Exception as e:  # noqa: BLE001
+            logger.debug("STS2 询问生成失败，用固定文案：%s", e)
+            return fallback
 
     async def _notify(self, umo: str, text: str) -> None:
         """主动往会话推一条消息（后台循环没有 event，只能这样发）。
