@@ -24,3 +24,4 @@ secrets/
 # --- 部署备份 ---
 *.bak-*
 main.py.bak-*
+_project/.git-commit-msg-*.txt
