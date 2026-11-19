@@ -3562,6 +3562,17 @@ class Sts2PlayerPlugin(Star):
             f"{text}\n"
             f"</sts2_game_context>"
         )
+        # 让模型知道它能主动接手：不用玩家背固定触发词，自己判断意图即可。
+        if not self._autopilot:
+            block += (
+                "\n<sts2_hint>\n"
+                "如果玩家这句话的意思是「让你接手继续打」（说法随意，比如"
+                "“你来打吧”“帮我打”“继续和我一起打”“这局交给你”"
+                "“接着打”“现在该怎么办你上”），"
+                "先调用 sts2_autopilot 接手后台托管，再简短回应一句。"
+                "如果玩家只是在聊天、问战况或讨论构筑，就不要调它。"
+                "\n</sts2_hint>"
+            )
         try:
             part = TextPart(text=block)
             if hasattr(part, "mark_as_temp"):
@@ -3685,3 +3696,42 @@ class Sts2PlayerPlugin(Star):
         if str(res.get("status")) == "error":
             return f"游戏拒绝了这个动作：{res.get('error')}\n可用动作参考：\n{ACTION_HELP}"
         return f"已执行：{res.get('message') or action}"
+
+    @filter.llm_tool(name="sts2_autopilot")
+    async def tool_sts2_autopilot(self, event: AstrMessageEvent, reason: str = "") -> str:
+        """接手后台托管：从现在起由你一直替玩家打下去，直到对局结束或玩家喊停。
+
+        什么时候该调用它（由你自己判断，不用玩家背固定说法）：
+          · 玩家表达了「让你接手」的意思，比如"你来打吧""帮我打""继续和我一起打"
+            "这局交给你了""接着打"——只要是这个意图，说法随意
+          · 玩家已经在问「现在什么情况/该出什么牌」并且明显想让你动手
+          · 你已经在用 sts2_action 一步一步打，但这样每次都要重新思考，很慢且费钱；
+            长局应该交给这个工具用规则层接着打（零模型成本）
+
+        什么时候不要调用：
+          · 玩家只是在闲聊、问战况、聊构筑，并没有让你接手
+          · 托管已经在跑（会返回提示，不会重复启动）
+
+        只在私聊生效（群里太吵，避免误触发）。
+
+        Args:
+            reason(string): 一句话说明你为什么认为玩家想让你接手，会记进日志便于排查。留空也行。
+        """
+        if not self._authorized(event):
+            return "当前用户没有操作游戏的权限。"
+        if not self._cfg("autopilot_from_chat", True):
+            return "配置里关掉了「聊天触发托管」(autopilot_from_chat)，无法自动启动。"
+
+        # 与 sts2 命令一致：只在私聊生效
+        try:
+            is_private = bool(event.is_private_chat())
+        except Exception:  # noqa: BLE001
+            is_private = True
+        if not is_private:
+            return "只在私聊里自动接手托管；群里请用 /sts2 托管。"
+
+        if reason:
+            logger.info("STS2 模型判断玩家想让我接手托管：%s", reason.replace("\n", " "))
+
+        msg = await self._start_autopilot(event.unified_msg_origin)
+        return msg

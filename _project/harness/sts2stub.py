@@ -49,13 +49,23 @@ class _Logger:
 class _AstrMessageEvent:
     """够插件用就行：_authorized 读 sender_id，回复走 plain_result。"""
 
-    def __init__(self, umo: str = "harness:local", sender_id: str = "10001"):
+    def __init__(
+        self,
+        umo: str = "harness:local",
+        sender_id: str = "10001",
+        is_private: bool = True,
+    ):
         self.unified_msg_origin = umo
         self._sender = sender_id
+        self._is_private = is_private
         self.sent: list[str] = []
 
     def get_sender_id(self) -> str:
         return self._sender
+
+    def is_private_chat(self) -> bool:
+        """真机上由 AstrBot 提供；sts2_autopilot 用它判断私聊/群聊。"""
+        return self._is_private
 
     def plain_result(self, text: str):
         self.sent.append(text)
